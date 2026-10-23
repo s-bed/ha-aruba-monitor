@@ -1,0 +1,12 @@
+cli output:
+COMMAND=show clients
+
+Client List
+-----------
+Name                  IP Address  MAC Address        OS    ESSID      Access Point  Channel  Type  Role  IPv6 Address  Signal    Speed (mbps)
+----                  ----------  -----------        --    -----      ------------  -------  ----  ----  ------------  ------    ------------
+Living room speaker   192.0.2.24  aa:bb:cc:00:00:01  NOFP  Old Wi-Fi  Office        36+      AN    Home  --            33(good)  120(good)
+                      192.0.2.25  aa:bb:cc:00:00:02  NOFP  New Wi-Fi  Office        6        GN    Home  --            25(good)  72(good)
+Smart Plug Mini-2D24  192.0.2.26  aa:bb:cc:00:00:03  NOFP  Old Wi-Fi  Bedroom       1        GN    Home  --            58(good)  72(good)
+Number of Clients :3
+Info timestamp :2008

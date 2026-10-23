@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Queue merged PRs instead of replacing a pending release with a newer one.
+concurrency:
+  group: aruba-monitor-release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Only execute trusted main after merge, including for PRs from forks.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Configure release author
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Prepare, validate and publish release refs
+        id: release
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A merge can advance main while hassfest runs. Rebuild and revalidate
+          # from the new main on a rejected atomic push; never force the branch.
+          for attempt in 1 2 3; do
+            git fetch --force --tags origin main
+            git reset --hard origin/main
+            latest_before=$(git ls-remote --refs origin refs/tags/latest | cut -f1)
+            python scripts/prepare_release.py \
+              --pr "$PR_NUMBER" --merge-sha "$MERGE_SHA" \
+              --output "$RUNNER_TEMP/release.env"
+            source "$RUNNER_TEMP/release.env"
+            python scripts/validate_package.py
+            docker run --rm -v "$GITHUB_WORKSPACE://github/workspace" ghcr.io/home-assistant/hassfest
+            if python - "$RUNNER_TEMP/release.env" "$latest_before" <<'PY'
+          import sys
+          from pathlib import Path
+          from scripts.prepare_release import push
+
+          release = dict(line.split("=", 1) for line in Path(sys.argv[1]).read_text().splitlines())
+          push(Path.cwd(), release, sys.argv[2])
+          PY
+            then
+              cat "$RUNNER_TEMP/release.env" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$created" == true ]]; then
+              git tag --delete "$tag"
+            fi
+          done
+          echo 'Release refs could not be published after three attempts.' >&2
+          exit 1
+      - name: Publish versioned release named latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          PUBLISH_LATEST: ${{ steps.release.outputs.publish_latest }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git archive --format=zip --prefix=aruba_monitor/ \
+            "$RELEASE_SHA:custom_components/aruba_monitor" > "$RUNNER_TEMP/aruba_monitor.zip"
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag \
+              --title latest --latest="$PUBLISH_LATEST" \
+              --notes "Aruba Monitor $RELEASE_TAG, published after merging #$PR_NUMBER." \
+              "$RUNNER_TEMP/aruba_monitor.zip"
+          elif [[ -z "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | select(.name == "aruba_monitor.zip") | .name')" ]]; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/aruba_monitor.zip"
+          fi
+          # Also finish a draft left behind by an interrupted create/upload.
+          gh release edit "$RELEASE_TAG" --draft=false --title latest --latest="$PUBLISH_LATEST"

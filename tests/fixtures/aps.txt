@@ -1,0 +1,9 @@
+cli output:
+COMMAND=show aps
+
+2 Access Points
+---------------
+Name     IP Address   Mode    Clients  Type         Serial #  Mesh Role  Uplink Port  radio0 Channel  radio0 Power (dBm)  radio0 Utilization (%)  radio0 Noise Floor (dBm)  radio1 Channel  radio1 Power (dBm)  radio1 Utilization (%)  radio1 Noise Floor (dBm)
+----     ----------   ----    -------  ----         --------  ---------  -----------  --------------  ------------------  ----------------------  ------------------------  --------------  ------------------  ----------------------  ------------------------
+Office   192.0.2.10*  access  2        535(indoor)  SERIAL01  Portal     eth0         36+             18                  3(good)                 -94(good)                 6               15                  29(good)                -96(good)
+Bedroom  192.0.2.11   access  1        535(indoor)  SERIAL02  Point      Wifi-mesh    -               -                   -                       -                         -               -                   -                       -

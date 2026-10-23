@@ -1,0 +1,7 @@
+Client List
+-----------
+Name                  IP Address  MAC Address        OS    ESSID      Access Point  Channel  Type  Role  IPv6 Address  Signal    Speed (mbps)
+----                  ----------  -----------        --    -----      ------------  -------  ----  ----  ------------  ------    ------------
+
+Number of Clients :0
+Info timestamp :2009

@@ -1,0 +1,7 @@
+Profile Name  ESSID      Clients  Type      Band         Authentication Method  Key Management  IP Assignment  Status   Zone                     Coding   Active  Max IPv4 Users
+------------  -----      -------  ----      ----         ---------------------  --------------  -------------  ------   ----                     ------   ------  --------------
+Profile01     Lab01      35       employee  all          None                   WPA2-AES        -              Enabled  -                        -        Yes     -
+Profile02     Lab03      2        employee  2.4ghz,5ghz  None                   WPA2-AES        -              Enabled  -                        -        No      -
+Profile03     Lab02      13       employee  2.4ghz,5ghz  None                   WPA2-AES        -              Enabled  -                        -        Yes     -
+Profile04     Lab05      0        guest     5ghz         None                   Enhanced-Open   -              Enabled  -                        -        Yes     -
+Profile05     Lab04      0        employee  5ghz,6ghz    None                   WPA3_SAE        -              Enabled  -                        -        Yes     -

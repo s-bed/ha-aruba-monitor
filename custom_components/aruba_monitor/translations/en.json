@@ -1,0 +1,68 @@
+{
+  "title": "Aruba Monitor",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Aruba Instant",
+        "description": "Monitor a locally managed Aruba Instant AOS-8 virtual controller. The site ID identifies stored data and entities and cannot be changed later.",
+        "data": {
+          "site_id": "Site ID",
+          "aruba_host": "Virtual controller hostname or IP",
+          "aruba_port": "HTTPS port",
+          "aruba_ip": "Instant AP IP address (optional)",
+          "aruba_user": "Username",
+          "aruba_password": "Password",
+          "aruba_verify_tls": "Verify TLS certificate",
+          "aruba_ca": "CA certificate file path (optional)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Update Aruba credentials",
+        "description": "The controller rejected its renewed session. Enter working credentials to resume collection.",
+        "data": {
+          "aruba_user": "Username",
+          "aruba_password": "Password"
+        }
+      },
+      "reconfigure": {
+        "title": "Configure controller connection",
+        "description": "The site ID and retained campaign data stay the same. Leave the password blank to keep the saved password.",
+        "data": {
+          "aruba_host": "Virtual controller hostname or IP",
+          "aruba_port": "HTTPS port",
+          "aruba_ip": "Instant AP IP address (optional)",
+          "aruba_user": "Username",
+          "aruba_password": "Password",
+          "aruba_verify_tls": "Verify TLS certificate",
+          "aruba_ca": "CA certificate file path (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the controller. Check its address, TLS settings and network access.",
+      "invalid_auth": "The controller rejected these credentials.",
+      "unsupported_controller": "The controller does not support a required Instant show command.",
+      "invalid_response": "A required controller table could not be validated after retrying.",
+      "invalid_config": "Check the site ID, controller address, port and timing settings.",
+      "unknown": "Unexpected connection check failure. Check the controller settings and try again."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Aruba Monitor instance is supported.",
+      "already_configured": "This Aruba Monitor site is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Collection timing",
+        "data": {
+          "interval": "Polling interval (seconds, minimum 5)",
+          "timeout": "HTTP request timeout (seconds)"
+        }
+      }
+    },
+    "error": {
+      "invalid_config": "Use a polling interval of at least five seconds and a positive HTTP timeout."
+    }
+  }
+}

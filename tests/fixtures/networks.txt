@@ -1,0 +1,7 @@
+Networks
+--------
+Profile Name  ESSID        Clients  Type      Band  Authentication Method  Key Management  IP Assignment  Status
+------------  -----        -------  ----      ----  ---------------------  --------------  -------------  ------
+OldProfile    Old Wi-Fi    2        employee  all   None                   WPA2-AES        Default VLAN   Enabled
+NewProfile    New Wi-Fi    1        employee  all   None                   WPA2-AES        Default VLAN   Enabled
+GuestProfile  Empty guest  0        guest     all   None                   WPA2-AES        Default VLAN   Enabled
