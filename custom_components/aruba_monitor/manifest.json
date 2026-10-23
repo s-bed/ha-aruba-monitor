@@ -1,14 +1,21 @@
 {
   "domain": "aruba_monitor",
   "name": "Aruba Monitor",
-  "codeowners": ["@s-bed"],
+  "codeowners": [
+    "@s-bed"
+  ],
   "config_flow": true,
-  "dependencies": ["frontend", "http", "panel_custom", "websocket_api"],
+  "dependencies": [
+    "frontend",
+    "http",
+    "panel_custom",
+    "websocket_api"
+  ],
   "documentation": "https://github.com/s-bed/ha-aruba-monitor",
   "integration_type": "hub",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/s-bed/ha-aruba-monitor/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.2.0"
+  "version": "0.2.1"
 }
