@@ -80,6 +80,40 @@ def test_rerunning_same_pr_recovers_version_without_bump(repository):
     assert git(repository, "rev-list", "--count", "HEAD") == "3"
 
 
+def test_manual_run_bumps_once_and_rerun_recovers_release(repository):
+    release = prepare(repository, run_id=12345)
+    rerun = prepare(repository, run_id=12345)
+
+    assert release["version"] == "0.2.1"
+    assert release["created"] == "true"
+    assert release["publish_latest"] == "true"
+    assert rerun == {**release, "created": "false"}
+    assert git(repository, "rev-list", "--count", "HEAD") == "2"
+    assert "Aruba-Release-Run: 12345" in git(repository, "show", "-s", "--format=%B").splitlines()
+    assert json.loads((repository / MANIFEST).read_text())["version"] == "0.2.1"
+    assert 'version = "0.2.1"' in (repository / "pyproject.toml").read_text()
+    assert git(repository, "rev-parse", "v0.2.1^{commit}") == release["sha"]
+
+
+def test_manual_runs_and_merged_prs_have_independent_bookkeeping(repository):
+    first = prepare(repository, run_id=17)
+    second = prepare(repository, 17, merge(repository))
+    third = prepare(repository, run_id=18)
+
+    assert first["version"] == "0.2.1"
+    assert second["version"] == "0.2.2"
+    assert third["version"] == "0.2.3"
+
+
+@pytest.mark.parametrize("pr,sha,run_id", [(None, None, 0), (1, "a" * 40, 1), (None, "a" * 40, 1)])
+def test_rejects_invalid_manual_event_without_mutation(repository, pr, sha, run_id):
+    before = git(repository, "rev-parse", "HEAD")
+    with pytest.raises(ValueError, match="positive manual run ID without PR metadata"):
+        prepare(repository, pr, sha, run_id=run_id)
+    assert git(repository, "rev-parse", "HEAD") == before
+    assert git(repository, "status", "--porcelain") == ""
+
+
 def test_old_pr_rerun_does_not_roll_latest_back(repository):
     first_merge = merge(repository)
     first = prepare(repository, 17, first_merge)
@@ -214,5 +248,21 @@ def test_old_pr_rerun_preserves_remote_latest_and_version_tag(repository):
 
     push(repository, prepare(repository, 17, first_merge), second["sha"])
 
+    assert git(target, "rev-parse", "latest") == second["sha"]
+    assert git(target, "rev-parse", first["tag"]) == original_version_tag
+
+
+def test_old_manual_rerun_preserves_remote_latest_and_version_tag(repository):
+    target = remote(repository)
+    first = prepare(repository, run_id=12345)
+    push(repository, first, "")
+    original_version_tag = git(target, "rev-parse", first["tag"])
+    second = prepare(repository, run_id=12346)
+    push(repository, second, first["sha"])
+
+    rerun = prepare(repository, run_id=12345)
+    push(repository, rerun, second["sha"])
+
+    assert rerun == {**first, "created": "false", "publish_latest": "false"}
     assert git(target, "rev-parse", "latest") == second["sha"]
     assert git(target, "rev-parse", first["tag"]) == original_version_tag

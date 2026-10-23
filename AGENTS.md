@@ -16,10 +16,13 @@ documentation and meaningful regression fixtures.
 ## Integration contracts
 
 Support exactly one controller and one config entry. Use native HA entities and
-an admin-only panel and WebSocket operations. Keep site/serial/exact-SSID identity hashes stable;
-renaming an AP must not create duplicate entities. Do not create per-client
-entities or infer physical identity from hostnames. Counts describe observed MAC
-connections independently from identity grouping.
+an admin-only panel and WebSocket operations. Keep site/serial/exact-SSID identity
+hashes stable; renaming an AP must not create duplicate entities. Create client entities per
+observed MAC, with connectivity enabled and all other client sensors disabled by
+default. Register network MAC connections for native HA device linking; never
+merge other integrations’ records or infer physical identity from hostnames.
+Client entity IDs must survive campaign linking/unlinking and name/SSID changes.
+Counts describe observed MAC connections independently from identity grouping.
 
 Read firmware with `show version` at startup. Collect `show clients`, `show aps`,
 and `show network` through `/rest/show-cmd` using the documented login/session
@@ -47,10 +50,12 @@ matches and unsupported hardware unknown. Never classify arbitrary hardware or
 the model list.
 
 Polling continues without enabled entities or an open panel. Collection failure
-immediately makes panel connectivity unknown and prevents campaign completion.
+immediately makes panel connectivity unknown, makes client connectivity entities
+unavailable, and prevents campaign completion.
 Native statistics retain values until stale after three polling intervals; AP
-metrics additionally require AP availability. Enforce stale deadlines even
-during reauth. After startup, require a new successful poll before reporting live
+metrics additionally require AP availability; client statistics require that MAC
+in the last successful collection. Client last-seen timestamps remain available
+as history. Enforce stale deadlines even during reauth. After startup, require a new successful poll before reporting live
 state or permitting completion. Load retained campaigns despite controller
 outages.
 
@@ -125,7 +130,9 @@ git diff --check
 ```
 
 CI keeps official hassfest validation and the release workflow. Merged pull
-requests automatically bump the patch version and publish releases; see
+requests and new manual workflow runs automatically bump the patch version and
+publish releases. Reruns must reuse the original release and preserve newer
+`latest` tags. Manual runs always release trusted `main`; see
 `README.md` for the release contract.
 
 Add meaningful regression coverage for changed parsing, band resolution,

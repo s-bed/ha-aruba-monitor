@@ -1,4 +1,4 @@
-"""Aruba collector, AP, radio and SSID sensors."""
+"""Aruba collector, AP, radio, SSID and optional Wi-Fi client sensors."""
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 

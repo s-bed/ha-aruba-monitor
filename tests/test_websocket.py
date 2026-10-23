@@ -90,7 +90,15 @@ async def test_admin_snapshot_uses_cache_without_collecting(hass, hass_ws_client
     coordinator = monitor.runtime_data
     with patch.object(coordinator.client, "collect", new_callable=AsyncMock) as collect:
         snapshot = await successful(client, "snapshot")
-    assert set(snapshot) == {"status", "clients", "campaigns", "aps", "ssids", "total_clients"}
+    assert set(snapshot) == {
+        "status",
+        "clients",
+        "client_connections",
+        "campaigns",
+        "aps",
+        "ssids",
+        "total_clients",
+    }
     assert snapshot["status"]["site_id"] == "home"
     assert "mqtt" not in snapshot["status"]
     assert snapshot["total_clients"] == 3

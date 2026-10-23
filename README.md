@@ -45,10 +45,13 @@ The integration provides native entities for:
 - Collector connectivity health, last successful collection, and total MAC connections.
 - AP connectivity, client count, and each reported radio's band, channel, power, utilization and noise floor.
 - SSID client totals and splits by AP and by 2.4/5/6 GHz or unknown band.
+- A **Wi-Fi connected** binary sensor for every observed client MAC, enabled by default. Optional IP address, SSID, access point, band, channel, signal-to-noise ratio, link speed and last-seen sensors are disabled by default; enable them from the device’s entity list.
 
-No per-client entities are created. Linking identities changes campaign grouping, not network connection counts. AP IDs use serial hashes; SSID IDs hash the exact UTF-8 SSID. AP renames preserve entity identities. Missing metrics remain unknown. Client signal is SNR in dB.
+Client devices advertise their network MAC to Home Assistant, which automatically links them to devices from other integrations exposing the same MAC, including devices discovered later. Home Assistant retains each integration’s device record and metadata. Matching uses the exact MAC, never a hostname; devices with randomized or different interface MACs require separate identities.
 
-A failed poll immediately marks collection unhealthy and panel connectivity unknown, and prevents campaign completion. Native statistics retain their last values until collection is stale after three polling intervals; AP statistics additionally require the AP to be online. A separate timer enforces staleness even during reauthentication. After every integration startup, live connectivity and completion remain blocked until that startup's first successful poll. Historical last-success timestamps remain visible.
+Client entities retain stable IDs when names, SSIDs or campaign identity links change. They remain registered when clients disconnect. Linking identities in the panel changes campaign grouping, not individual MAC entities or network connection counts. AP IDs use serial hashes; SSID IDs hash the exact UTF-8 SSID. AP renames preserve entity identities. Missing metrics remain unknown. Client signal is SNR in dB.
+
+A failed poll immediately marks collection unhealthy, makes client connectivity entities unavailable and panel connectivity unknown, and prevents campaign completion. Native statistics retain their last values until collection is stale after three polling intervals; AP statistics additionally require the AP to be online; client statistics require that MAC to be connected in the last successful collection. Client last-seen timestamps remain available as historical values. A separate timer enforces staleness even during reauthentication. After every integration startup, live connectivity and completion remain blocked until that startup's first successful poll. Historical last-success timestamps remain visible.
 
 ## Campaign rules
 
@@ -87,7 +90,9 @@ The panel's administrator-only WebSocket commands are namespaced under `aruba_mo
 
 ## Releases
 
-Merging a pull request into `main` automatically publishes a release. The release workflow increments the patch version, updates `custom_components/aruba_monitor/manifest.json` and `pyproject.toml`, and commits the version change to `main`. For example, `0.2.0` becomes `0.2.1`. No manual version bump is needed for routine changes.
+Merging a pull request into `main` automatically publishes a release. The workflow increments the patch version, updates `custom_components/aruba_monitor/manifest.json` and `pyproject.toml`, and commits the version change to `main`. For example, `0.2.0` becomes `0.2.1`. No manual version bump is needed for routine changes.
+
+To publish manually, open **Actions → Release → Run workflow**. Manual runs always release `main`, even if another branch is selected in the run dialog. Each new manual run increments the patch version; rerunning the same workflow run retries its original release without another bump.
 
 Each release is named **latest**, has a permanent version tag such as `v0.2.1`, and is marked as GitHub’s latest release. The [latest release page](https://github.com/s-bed/ha-aruba-monitor/releases/latest) always opens the newest published version. A rolling `latest` Git tag points to the same commit. Versioned release tags let HACS detect updates and let you select an older version.
 
