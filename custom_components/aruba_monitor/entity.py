@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from homeassistant.const import SIGNAL_STRENGTH_DECIBELS, UnitOfDataRate
 from homeassistant.core import callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -28,10 +29,11 @@ class Metric:
     device_class: str | None = None
     measurement: bool = False
     diagnostic: bool = False
+    enabled_by_default: bool = True
 
 
 def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
-    """Build native collector, AP, radio and SSID metrics."""
+    """Build native collector, AP, radio, SSID and individual MAC metrics."""
     status = snapshot["status"]
     available = not status["stale"]
     parent_id = f"aruba_{site}"
@@ -56,6 +58,7 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
         device_class=None,
         measurement=False,
         diagnostic=False,
+        enabled_by_default=True,
     ):
         metrics[key] = Metric(
             key,
@@ -68,6 +71,7 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
             device_class,
             measurement,
             diagnostic,
+            enabled_by_default,
         )
 
     add(
@@ -153,6 +157,56 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
                 device,
                 measurement=True,
             )
+    for client in snapshot["client_connections"]:
+        mac = dr.format_mac(client["mac"])
+        key = f"client_{ssid_id(mac)}"
+        connected = client["last_seen"] == status["last_success"]
+        device = DeviceInfo(
+            identifiers={(DOMAIN, f"{parent_id}_{key}")},
+            connections={(dr.CONNECTION_NETWORK_MAC, mac)},
+            name=client.get("label") or client.get("name") or f"Wi-Fi client {mac}",
+            via_device=(DOMAIN, parent_id),
+        )
+        add(
+            f"{key}_online",
+            "Wi-Fi connected",
+            connected if status["fresh"] else None,
+            device,
+            platform="binary_sensor",
+            online=status["fresh"],
+            device_class="connectivity",
+        )
+        for field, label, unit, device_class in (
+            ("ip", "IP address", None, None),
+            ("ssid", "SSID", None, None),
+            ("ap", "Access point", None, None),
+            ("band", "Band", None, None),
+            ("channel", "Channel", None, None),
+            ("signal_db", "Signal-to-noise ratio", SIGNAL_STRENGTH_DECIBELS, "signal_strength"),
+            ("speed_mbps", "Link speed", UnitOfDataRate.MEGABITS_PER_SECOND, "data_rate"),
+        ):
+            add(
+                f"{key}_{field}",
+                label,
+                client.get(field),
+                device,
+                online=available and connected,
+                unit=unit,
+                device_class=device_class,
+                measurement=bool(unit),
+                diagnostic=True,
+                enabled_by_default=False,
+            )
+        add(
+            f"{key}_last_seen",
+            "Last seen",
+            datetime.fromisoformat(client["last_seen"]),
+            device,
+            online=True,
+            device_class="timestamp",
+            diagnostic=True,
+            enabled_by_default=False,
+        )
     return metrics
 
 
@@ -167,6 +221,7 @@ class ArubaEntity(CoordinatorEntity):
         self._attr_unique_id = f"aruba_{coordinator.settings.site_id}_{key}"
         self._initial = coordinator.metrics[key]
         self._attr_entity_category = EntityCategory.DIAGNOSTIC if self._initial.diagnostic else None
+        self._attr_entity_registry_enabled_default = self._initial.enabled_by_default
 
     @property
     def metric(self):

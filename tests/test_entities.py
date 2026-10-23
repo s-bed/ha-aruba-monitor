@@ -88,6 +88,64 @@ def test_native_counts_still_count_mac_connections_after_identity_linking(store)
     assert metrics[f"ssid_{ssid_id('Old Wi-Fi')}_clients"].value == 2
 
 
+def test_client_metrics_keep_per_mac_identity_and_evidence_through_panel_linking(store, time_at):
+    first, second = "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02"
+    store.ingest([client(mac=first), client(mac=second, ssid="New Wi-Fi")], [ap()], inventory(), time_at(0))
+    store.ingest([client(mac=second, ssid="New Wi-Fi")], [ap()], inventory(), time_at(1))
+    before = build_metrics(store.snapshot(), "home")
+    identity = next(row for row in store.clients() if row["mac"] == first)
+    store.link(identity["id"], second)
+    store.label(identity["id"], "Living room device")
+    snapshot = store.snapshot()
+    linked = build_metrics(snapshot, "home")
+    assert len(snapshot["clients"]) == 1
+    assert len(snapshot["client_connections"]) == 2
+    assert before.keys() == linked.keys()
+    for mac, connected in ((first, False), (second, True)):
+        key = f"client_{ssid_id(mac)}"
+        assert linked[f"{key}_online"].value is connected
+        assert linked[f"{key}_online"].available
+        assert linked[f"{key}_online"].device["connections"] == {("mac", mac)}
+        assert linked[f"{key}_online"].device["identifiers"] == {(DOMAIN, f"aruba_home_{key}")}
+        assert linked[f"{key}_online"].device["name"] == "Living room device"
+        assert linked[f"{key}_ssid"].value == ("New Wi-Fi" if connected else "Old Wi-Fi")
+        assert linked[f"{key}_ssid"].available is connected
+        assert linked[f"{key}_last_seen"].available
+        assert linked[f"{key}_online"].enabled_by_default
+        assert all(
+            not metric.enabled_by_default
+            for name, metric in linked.items()
+            if name.startswith(f"{key}_") and name != f"{key}_online"
+        )
+    store.unlink(identity["id"], second)
+    assert build_metrics(store.snapshot(), "home").keys() == before.keys()
+
+
+def test_client_unknown_metrics_units_and_failure_availability(store):
+    mac = "aa:bb:cc:00:00:01"
+    store.ingest([client(mac=mac, signal_db=None, speed_mbps=None, name=None)], [ap()], inventory())
+    snapshot = store.snapshot()
+    metrics = build_metrics(snapshot, "home")
+    key = f"client_{ssid_id(mac)}"
+    assert metrics[f"{key}_online"].device["name"] == f"Wi-Fi client {mac}"
+    assert "manufacturer" not in metrics[f"{key}_online"].device
+    for field in ("signal_db", "speed_mbps", "band", "channel"):
+        assert metrics[f"{key}_{field}"].value is None
+    assert metrics[f"{key}_signal_db"].unit == "dB"
+    assert metrics[f"{key}_signal_db"].device_class == "signal_strength"
+    assert metrics[f"{key}_speed_mbps"].unit == "Mbit/s"
+    assert metrics[f"{key}_speed_mbps"].device_class == "data_rate"
+    snapshot["status"].update(fresh=False, last_error="Controller unavailable")
+    grace = build_metrics(snapshot, "home")
+    assert not grace[f"{key}_online"].available
+    assert grace[f"{key}_online"].value is None
+    assert grace[f"{key}_signal_db"].available
+    snapshot["status"]["stale"] = True
+    stale = build_metrics(snapshot, "home")
+    assert not stale[f"{key}_signal_db"].available
+    assert stale[f"{key}_last_seen"].available
+
+
 def test_ap_offline_gates_its_statistics_but_keeps_connectivity_visible(store):
     snapshot = make_snapshot(store)
     snapshot["aps"][0]["online"] = False
@@ -115,7 +173,7 @@ def test_collection_error_grace_and_stale_deadline_have_distinct_availability(st
     assert all(
         not metric.available
         for key, metric in stale.items()
-        if key not in {"collection_health", "last_success"}
+        if key not in {"collection_health", "last_success"} and not key.endswith("_last_seen")
     )
     assert stale["cluster_clients"].value == grace["cluster_clients"].value
 

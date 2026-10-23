@@ -342,7 +342,15 @@ def test_snapshot_has_atomic_flat_contract_and_checkpoint_retains_committed_data
     try:
         store.ingest([client()], [ap()], inventory())
         snapshot = store.snapshot()
-        assert set(snapshot) == {"status", "clients", "campaigns", "aps", "ssids", "total_clients"}
+        assert set(snapshot) == {
+            "status",
+            "clients",
+            "client_connections",
+            "campaigns",
+            "aps",
+            "ssids",
+            "total_clients",
+        }
         assert snapshot["status"]["fresh"]
         assert snapshot["total_clients"] == 1
         assert snapshot["clients"][0]["last_seen"] == snapshot["status"]["last_success"]

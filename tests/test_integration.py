@@ -222,9 +222,10 @@ async def test_device_metadata_and_parent_links_refresh_with_retained_inventory(
     assert parent.sw_version == "8.10.0.16"
     devices = dr.async_entries_for_config_entry(registry, entry.entry_id)
     children = [device for device in devices if device.id != parent.id]
-    assert len(children) == len(aps) + len(networks)
+    assert len(children) == len(aps) + len(networks) + len(clients)
     assert all(device.via_device_id == parent.id for device in children)
-    assert all(device.manufacturer == "HPE Aruba Networking" for device in children)
+    assert all(device.manufacturer == "HPE Aruba Networking" for device in children if not device.connections)
+    assert len([device for device in children if device.connections]) == len(clients)
 
     original = aps[0]
     identifiers = {(DOMAIN, f"aruba_home_ap_{ssid_id(original['serial'])}")}

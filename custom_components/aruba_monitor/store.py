@@ -287,6 +287,25 @@ class Store:
         with self.lock:
             return self._clients()
 
+    def _client_connections(self, status: dict) -> list[dict]:
+        """Keep each MAC's observations separate from campaign identity grouping."""
+        return [
+            {
+                **json.loads(row["payload"]),
+                "mac": row["mac"],
+                "label": row["label"],
+                "first_seen": row["first_seen"],
+                "last_seen": row["last_seen"],
+                "connection": ("connected" if row["last_seen"] == status["last_success"] else "offline")
+                if status["fresh"]
+                else "unknown",
+            }
+            for row in self.db.execute(
+                """SELECT a.*,d.label FROM aliases a JOIN devices d ON a.device_id=d.id
+                   ORDER BY a.mac"""
+            )
+        ]
+
     def network(self):
         with self.lock:
             status = self.status()
@@ -504,9 +523,11 @@ class Store:
     def snapshot(self) -> dict:
         """Return one internally consistent view for entities and the sidebar."""
         with self.lock:
+            status = self.status()
             return {
-                "status": self.status(),
+                "status": status,
                 "clients": self._clients(),
+                "client_connections": self._client_connections(status),
                 "campaigns": self.campaigns(),
                 **self.network(),
             }

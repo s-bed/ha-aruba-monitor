@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   pull_request_target:
     types: [closed]
     branches: [main]
@@ -8,7 +9,7 @@ on:
 permissions:
   contents: write
 
-# Queue merged PRs instead of replacing a pending release with a newer one.
+# Queue releases instead of replacing a pending release with a newer one.
 concurrency:
   group: aruba-monitor-release
   cancel-in-progress: false
@@ -16,11 +17,11 @@ concurrency:
 
 jobs:
   release:
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # Only execute trusted main after merge, including for PRs from forks.
+      # Always execute trusted main, including manual runs selecting another ref.
       - uses: actions/checkout@v7
         with:
           ref: main
@@ -46,9 +47,14 @@ jobs:
             git fetch --force --tags origin main
             git reset --hard origin/main
             latest_before=$(git ls-remote --refs origin refs/tags/latest | cut -f1)
-            python scripts/prepare_release.py \
-              --pr "$PR_NUMBER" --merge-sha "$MERGE_SHA" \
-              --output "$RUNNER_TEMP/release.env"
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+              python scripts/prepare_release.py --run-id "$GITHUB_RUN_ID" \
+                --output "$RUNNER_TEMP/release.env"
+            else
+              python scripts/prepare_release.py \
+                --pr "$PR_NUMBER" --merge-sha "$MERGE_SHA" \
+                --output "$RUNNER_TEMP/release.env"
+            fi
             source "$RUNNER_TEMP/release.env"
             python scripts/validate_package.py
             docker run --rm -v "$GITHUB_WORKSPACE://github/workspace" ghcr.io/home-assistant/hassfest
@@ -82,10 +88,15 @@ jobs:
           set -euo pipefail
           git archive --format=zip --prefix=aruba_monitor/ \
             "$RELEASE_SHA:custom_components/aruba_monitor" > "$RUNNER_TEMP/aruba_monitor.zip"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            release_notes="Aruba Monitor $RELEASE_TAG, published by manual workflow run $GITHUB_RUN_ID."
+          else
+            release_notes="Aruba Monitor $RELEASE_TAG, published after merging #$PR_NUMBER."
+          fi
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag \
               --title latest --latest="$PUBLISH_LATEST" \
-              --notes "Aruba Monitor $RELEASE_TAG, published after merging #$PR_NUMBER." \
+              --notes "$release_notes" \
               "$RUNNER_TEMP/aruba_monitor.zip"
           elif [[ -z "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | select(.name == "aruba_monitor.zip") | .name')" ]]; then
             gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/aruba_monitor.zip"

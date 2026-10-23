@@ -1,4 +1,4 @@
-"""Aruba collection health and AP connectivity."""
+"""Aruba collection health, AP connectivity and Wi-Fi client connectivity."""
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 
