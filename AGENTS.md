@@ -149,6 +149,9 @@ Only publish the current head of an open PR targeting main; older runs must not
 roll back newer previews. Package only integration runtime files, rejecting links,
 submodules, secrets and data files. Preview manifest versions must identify the
 source build. Never execute PR code with the publishing token.
+Closing or merging a PR removes only its workflow-owned preview release and tag.
+Serialize cleanup with publication, recheck the live closed state, preserve stable
+and unrelated releases/tags, and support idempotent cleanup through manual runs.
 
 Add meaningful regression coverage for changed parsing, band resolution,
 campaign evidence, identity operations, deletion, availability, or storage

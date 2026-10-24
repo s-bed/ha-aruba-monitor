@@ -2,12 +2,12 @@ name: PR preview
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize]
+    types: [opened, reopened, synchronize, closed]
     branches: [main]
   workflow_dispatch:
     inputs:
       pull_request:
-        description: Open pull request number to package
+        description: Pull request number to preview (open) or clean up (closed)
         required: true
         type: number
 
@@ -15,8 +15,9 @@ permissions:
   contents: write
   pull-requests: read
 
-# Serialize each PR, including manual runs and reruns. Stale events are skipped
-# against the live PR head, so an older run cannot replace a newer preview.
+# Serialize publication and cleanup for each PR, including manual runs and reruns.
+# Check the live PR state/head so stale runs cannot remove a reopened preview or
+# replace a newer preview.
 concurrency:
   group: aruba-monitor-preview-${{ github.event.pull_request.number || inputs.pull_request }}
   cancel-in-progress: false
@@ -36,7 +37,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-      - name: Package and publish current PR preview
+      - name: Publish current preview or clean up closed PR
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request }}

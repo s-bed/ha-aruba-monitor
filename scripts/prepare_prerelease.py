@@ -1,4 +1,4 @@
-"""Package PR Git blobs using trusted code and update one rolling prerelease per PR."""
+"""Publish open PR previews from Git blobs and clean up previews for closed PRs."""
 
 from __future__ import annotations
 
@@ -152,6 +152,8 @@ class GitHub:
         )
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
+                if response.status == 204:
+                    return None
                 return json.load(response)
         except urllib.error.HTTPError as error:
             if missing and error.code == 404:
@@ -173,6 +175,15 @@ class GitHub:
             return None
         return head
 
+    def closed(self, pr: int) -> bool:
+        """Only a currently closed PR targeting this repository's main may be cleaned up."""
+        pull = self.api("GET", f"pulls/{pr}")
+        return (
+            pull["state"] == "closed"
+            and pull["base"]["ref"] == "main"
+            and pull["base"]["repo"]["full_name"].lower() == self.repository.lower()
+        )
+
     def find_release(self, tag: str) -> dict | None:
         """Find published previews or drafts left by an interrupted publication."""
         if release := self.api("GET", f"releases/tags/{tag}", missing=True):
@@ -187,6 +198,54 @@ class GitHub:
             if len(releases) < 100:
                 return None
             page += 1
+
+
+def cleanup(root: Path, github: GitHub, pr: int) -> bool:
+    """Delete only this workflow's preview release and tag for a still-closed PR."""
+    if pr < 1:
+        raise ValueError("A positive PR number is required")
+    if not github.closed(pr):
+        return False
+    tag = f"pr-{pr}"
+    release = github.find_release(tag)
+    if release is not None:
+        marker = RELEASE_MARKER.search(release.get("body") or "")
+        if (
+            release["tag_name"] != tag
+            or not release["prerelease"]
+            or release.get("immutable", False)
+            or marker is None
+            or int(marker[1]) != pr
+        ):
+            raise ValueError("Cleanup requires a mutable prerelease owned by this PR preview workflow")
+    ref = f"refs/tags/{tag}"
+    previous = text_git(root, "ls-remote", "--refs", "origin", ref).split()
+    if previous:
+        # Validate the tag independently, including orphan tags from a failed
+        # release creation. Fetch objects only; never check out or execute them.
+        git(root, "fetch", "--no-tags", "origin", ref)
+        if text_git(root, "rev-parse", "FETCH_HEAD") != previous[0]:
+            return False
+        message = text_git(root, "show", "-s", "--format=%B", "FETCH_HEAD^{commit}")
+        match = re.fullmatch(
+            rf"Preview PR #{pr}\n\nAruba-Preview-Head: (?P<head>{SHA.pattern})\n"
+            rf"Aruba-Preview-Version: {VERSION.pattern}-dev\.{pr}\.[1-9]\d*\.g(?P<short>[0-9a-f]{{12}})",
+            message,
+        )
+        if match is None or match["head"][:12] != match["short"]:
+            raise ValueError("Cleanup tag does not belong to this PR preview workflow")
+    if not release and not previous:
+        return False
+    # A queued close event must leave a reopened PR alone. Per-PR workflow
+    # concurrency serializes cleanup with publication; a later reopen rebuilds it.
+    if not github.closed(pr):
+        return False
+    if release:
+        github.api("DELETE", f"releases/{release['id']}", missing=True)
+    if previous:
+        git(root, "push", f"--force-with-lease={ref}:{previous[0]}", "origin", f":{ref}")
+    print(f"Removed closed PR #{pr} preview release and tag.")
+    return True
 
 
 def publish(
@@ -204,12 +263,14 @@ def publish(
         raise ValueError("Invalid preview event metadata")
     head = github.current(pr, expected)
     if head is None:
+        cleanup(root, github, pr)
         return None
     git(root, "fetch", "--no-tags", "origin", f"refs/pull/{pr}/head")
     if text_git(root, "rev-parse", "FETCH_HEAD") != head:
         return None
     preview = package(root, head, pr, run_id, output)
     if github.current(pr, head) is None:
+        cleanup(root, github, pr)
         return None
     tag = preview["tag"]
     metadata = {
@@ -265,6 +326,8 @@ def publish(
     )
     if github.current(pr, head) is None:
         # Keep the release hidden until the queued run supplies the new head.
+        # If the PR closed instead, remove the now-unneeded preview immediately.
+        cleanup(root, github, pr)
         return None
     github.api("PATCH", f"releases/{release['id']}", {**metadata, "draft": False})
     return preview
@@ -312,4 +375,4 @@ if __name__ == "__main__":
                     f"[Download PR #{arguments.pr} preview](https://github.com/{repository}/releases/tag/{preview['tag']})\n"
                 )
     else:
-        print("Preview skipped because the PR was closed, retargeted or superseded.")
+        print("No preview published: the PR is closed, retargeted or superseded.")
