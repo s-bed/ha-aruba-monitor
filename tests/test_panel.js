@@ -303,6 +303,16 @@ test("clients open first, network follows, and migrations is last", () => {
   assert.deepEqual(tabs, [["clients", "true"], ["network", "false"], ["migrations", "false"]]);
   assert.match(root.innerHTML, /<section id="clients" class="view">/);
   assert.match(root.innerHTML, /<section id="migrations" class="view" hidden>/);
+  assert.doesNotMatch(root.innerHTML, /toggle-menu|Toggle Home Assistant sidebar|☰/);
+});
+
+test("client and SSID explanations are attached to question-mark help buttons", () => {
+  const {root} = setup();
+  for (const [id, text] of [["clients-help", "Enable Presence"], ["ssids-help", "Automatic cleanup can be configured"]]) {
+    assert.match(root.innerHTML, new RegExp(`aria-describedby="${id}"><svg[^>]*aria-hidden="true"`));
+    assert.match(root.innerHTML, new RegExp(`id="${id}" class="help-tooltip-text" role="tooltip">${text}`));
+    assert.doesNotMatch(root.innerHTML, new RegExp(`<p[^>]*>${text}`));
+  }
 });
 
 function haDevices(name = "Kitchen speaker") {
@@ -686,6 +696,26 @@ test("client details expose protection and explain deletion blockers with escape
   assert.match(panel.$("#clients-table").innerHTML, /Protected from automatic cleanup/);
 });
 
+test("client cleanup and deletion explanations use tooltips while deletion blockers stay visible", async () => {
+  const {panel} = setup();
+  const client = retainedClient(panel);
+  panel._hass.callWS = async () => haDevices();
+  await panel.renderDevice(client.id);
+  let html = panel.$("#device-content").innerHTML;
+  for (const [id, text] of [["client-protection-help", "Retain this client"], ["client-delete-help", "Permanently remove this client"]]) {
+    assert.match(html, new RegExp(`aria-describedby="${id}"><svg[^>]*aria-hidden="true"`));
+    assert.match(html, new RegExp(`id="${id}" class="help-tooltip-text" role="tooltip">${text}`));
+    assert.doesNotMatch(html, new RegExp(`<p[^>]*>${text}`));
+  }
+  assert.match(html, /membership, exclusions and evidence in all migration campaigns/);
+  assert.doesNotMatch(html, /<p class="caption delete-reason">/);
+  client.delete_allowed = false;
+  client.delete_reason = "Client is still detected.";
+  await panel.renderDevice(client.id);
+  html = panel.$("#device-content").innerHTML;
+  assert.match(html, /<p class="caption delete-reason">Client is still detected\.<\/p>/);
+});
+
 for (const protectedValue of [true, false]) {
   test(`client protection can be ${protectedValue ? "enabled" : "disabled"} without resetting dialog drafts`, async () => {
     const {panel, calls} = setup();
@@ -776,6 +806,8 @@ test("cancelled client deletion names the client, explains scope and preserves p
   assert.equal(calls.length, 1);
   assert.match(calls[0][1], /pending device/);
   assert.match(calls[0][1], /permanently.*observation history.*Aruba Monitor devices and entities/);
+  assert.match(calls[0][1], /all migration campaigns.*migration evidence and exclusions/);
+  assert.match(calls[0][1], /Campaign progress will be recalculated/);
   assert.match(calls[0][1], /other integrations are untouched/);
   assert.match(calls[0][1], /discovered again/);
   assert.equal(panel.$("#device-dialog").open, true);

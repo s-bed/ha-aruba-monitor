@@ -595,6 +595,53 @@ async def test_client_protection_and_manual_deletion_preserve_foreign_devices(ha
     assert registry.async_get(foreign.id) is foreign
 
 
+@pytest.mark.parametrize("completed", [False, True])
+async def test_manual_client_deletion_removes_saved_campaign_membership(
+    hass, hass_ws_client, monitor, completed
+):
+    connection = await hass_ws_client(hass)
+    coordinator = monitor.runtime_data
+    campaign = await successful(
+        connection, "campaign_create", name="Rotation", source="Old Wi-Fi", target="New Wi-Fi"
+    )
+    deleted = campaign["clients"][0]
+    await successful(
+        connection,
+        "campaign_exclude",
+        campaign_id=campaign["id"],
+        device_id=deleted["id"],
+        excluded=True,
+        note="Retired client",
+    )
+    observations = [{**row, "ssid": "New Wi-Fi"} for row in coordinator.snapshot["clients"]]
+    at = datetime.now(UTC) + timedelta(seconds=1)
+    await hass.async_add_executor_job(coordinator.store.ingest, observations, [], [], at.isoformat())
+    await coordinator.async_refresh_status()
+    if completed:
+        await successful(connection, "campaign_complete", campaign_id=campaign["id"])
+    await hass.async_add_executor_job(
+        coordinator.store.ingest, [], [], [], (at + timedelta(seconds=1)).isoformat()
+    )
+    await coordinator.async_refresh_status()
+    before = coordinator.inventory_revision
+
+    with patch.object(coordinator.client, "collect", new_callable=AsyncMock) as collect:
+        assert await successful(connection, "client_delete", device_id=deleted["id"]) == {"ok": True}
+        snapshot = await successful(connection, "snapshot")
+        collect.assert_not_awaited()
+
+    assert coordinator.inventory_revision == before + 1
+    assert deleted["id"] not in {row["id"] for row in snapshot["clients"]}
+    saved = snapshot["campaigns"][0]
+    assert saved["id"] == campaign["id"]
+    assert bool(saved["completed_at"]) is completed
+    assert saved["total"] == 1
+    assert saved["counts"]["excluded"] == 0
+    assert saved["counts"]["confirmed"] == 1
+    assert saved["progress_pct"] == 100
+    assert deleted["id"] not in {row["id"] for row in saved["clients"]}
+
+
 async def test_ssid_deletion_requires_absence_and_preserves_history(hass, hass_ws_client, monitor):
     connection = await hass_ws_client(hass)
     coordinator = monitor.runtime_data

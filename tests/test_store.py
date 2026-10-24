@@ -476,7 +476,7 @@ def test_startup_blocks_deletion_until_new_success_even_with_recent_saved_state(
 
 @pytest.mark.parametrize("completed", [False, True])
 @pytest.mark.parametrize("evidence_only", [False, True])
-def test_saved_campaign_members_and_evidence_prevent_client_deletion(
+def test_saved_campaign_references_prevent_cleanup_but_allow_manual_client_deletion(
     store, time_at, completed, evidence_only
 ):
     store.ingest([client()], [], inventory(), time_at(-60 * 86400))
@@ -490,14 +490,92 @@ def test_saved_campaign_members_and_evidence_prevent_client_deletion(
             store.db.execute("DELETE FROM members WHERE campaign_id=?", (cid,))
     device = store.clients()[0]["id"]
     store.ingest([], [], [], time_at(0))
-    assert "saved migration campaign" in store.clients()[0]["delete_reason"]
-    with pytest.raises(ValueError, match="saved migration campaign"):
-        store.delete_client(device)
-    assert store.cleanup(30, None, at=time_at(0)) == {"clients": 0, "ssids": 0}
-    store.delete_campaign(cid)
     assert store.clients()[0]["delete_allowed"]
+    assert store.cleanup(30, None, at=time_at(0)) == {"clients": 0, "ssids": 0}
     store.delete_client(device)
     assert not store.clients()
+    assert campaign(store)["id"] == cid
+    assert campaign(store)["total"] == 0
+    assert not campaign(store)["ready"]
+    assert bool(campaign(store)["completed_at"]) is completed
+    for table in ("members", "evidence"):
+        assert store.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert store.db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_manual_deletion_removes_every_alias_from_all_campaigns_and_preserves_other_clients(store, time_at):
+    observations = [client(mac=f"aa:bb:cc:00:00:0{number}") for number in range(1, 4)]
+    store.ingest(observations, [ap()], inventory(), time_at(0))
+    clients = {row["mac"]: row for row in store.clients()}
+    deleted, alias, retained = (clients[row["mac"]] for row in observations)
+    active = store.create_campaign("Active", "Old Wi-Fi", "New Wi-Fi", time_at(1))
+    completed = store.create_campaign("Completed", "Old Wi-Fi", "New Wi-Fi", time_at(1))
+    store.link(deleted["id"], alias["mac"])
+    store.label(retained["id"], "Keep this label")
+    store.protect_client(deleted["id"], True)
+    store.protect_client(retained["id"], True)
+    for cid in (active, completed):
+        store.exclude(cid, deleted["id"], True, "Retired aliases")
+    store.ingest([{**row, "ssid": "New Wi-Fi"} for row in observations], [ap()], inventory(), time_at(2))
+    store.complete(completed)
+    store.ingest([], [ap()], inventory(), time_at(3))
+    retained_before = next(row for row in store.clients() if row["id"] == retained["id"])
+    metadata_before = [tuple(row) for row in store.db.execute("SELECT * FROM campaigns ORDER BY id")]
+    inventory_before = [tuple(row) for row in store.db.execute("SELECT * FROM inventory ORDER BY kind,id")]
+    rows_before = {
+        table: [
+            tuple(row) for row in store.db.execute(f"SELECT * FROM {table} WHERE mac=?", (retained["mac"],))
+        ]
+        for table in ("members", "evidence")
+    }
+
+    store.delete_client(deleted["id"])
+
+    assert store.clients() == [retained_before]
+    assert [tuple(row) for row in store.db.execute("SELECT * FROM campaigns ORDER BY id")] == metadata_before
+    assert [
+        tuple(row) for row in store.db.execute("SELECT * FROM inventory ORDER BY kind,id")
+    ] == inventory_before
+    assert store._protected_macs() == {retained["mac"]}
+    for table in ("aliases", "sightings", "members", "evidence"):
+        for mac in (deleted["mac"], alias["mac"]):
+            assert store.db.execute(f"SELECT 1 FROM {table} WHERE mac=?", (mac,)).fetchone() is None
+    for table, rows in rows_before.items():
+        assert [
+            tuple(row) for row in store.db.execute(f"SELECT * FROM {table} WHERE mac=?", (retained["mac"],))
+        ] == rows
+    for result in store.campaigns():
+        assert result["total"] == 1
+        assert result["counts"]["excluded"] == 0
+        assert result["counts"]["confirmed"] == 1
+        assert [row["id"] for row in result["clients"]] == [retained["id"]]
+    assert store.db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("failure_table", ["evidence", "members", "aliases", "devices"])
+def test_campaign_client_deletion_rolls_back_members_exclusions_and_evidence(store, time_at, failure_table):
+    import sqlite3
+
+    observations = [client(), client(mac="aa:bb:cc:00:00:02")]
+    store.ingest(observations, [], inventory(), time_at(0))
+    deleted = next(row for row in store.clients() if row["mac"] == observations[0]["mac"])
+    cid = store.create_campaign("Preserve on failure", "Old Wi-Fi", "New Wi-Fi", time_at(1))
+    store.link(deleted["id"], observations[1]["mac"])
+    store.protect_client(deleted["id"], True)
+    store.exclude(cid, deleted["id"], True, "Retired aliases")
+    store.ingest([{**row, "ssid": "New Wi-Fi"} for row in observations], [], [], time_at(2))
+    store.ingest([], [], [], time_at(3))
+    tables = ("meta", "devices", "aliases", "sightings", "inventory", "campaigns", "members", "evidence")
+    before = {table: [tuple(row) for row in store.db.execute(f"SELECT * FROM {table}")] for table in tables}
+    store.db.executescript(f"""CREATE TEMP TRIGGER abort_client_delete BEFORE DELETE ON {failure_table}
+        BEGIN SELECT RAISE(ABORT, 'test delete failure'); END;""")
+
+    with pytest.raises(sqlite3.IntegrityError, match="test delete failure"):
+        store.delete_client(deleted["id"])
+
+    for table, rows in before.items():
+        assert [tuple(row) for row in store.db.execute(f"SELECT * FROM {table}")] == rows
+    assert store.db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_linked_client_deletion_requires_every_alias_absent(store, time_at):
