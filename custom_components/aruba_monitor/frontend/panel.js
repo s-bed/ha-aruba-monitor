@@ -14,11 +14,12 @@ class ArubaMonitorPanel extends HTMLElement {
     this.data = null;
     this.inFlight = null;
     this.openDevice = null;
+    this.deviceRequest = 0;
     this.campaignQueries = new Map();
     this.campaignStates = new Map();
     this.expandedCampaigns = new Set();
     this.viewScroll = new Map();
-    this.view = "migrations";
+    this.view = "clients";
     this.pendingRender = false;
     this.mounted = false;
     this.generation = 0;
@@ -29,19 +30,14 @@ class ArubaMonitorPanel extends HTMLElement {
       <header>
         <div class="brand"><button class="menu-button" id="toggle-menu" aria-label="Toggle Home Assistant sidebar">☰</button><span class="brand-mark" aria-hidden="true">a</span><h1>Aruba monitor</h1><span id="site-name" class="site-name muted"></span></div>
         <nav aria-label="Dashboard views">
-          <button data-view="migrations" aria-selected="true">Migrations</button>
-          <button data-view="clients" aria-selected="false">Clients <span id="client-count" class="count">0</span></button>
+          <button data-view="clients" aria-selected="true">Clients <span id="client-count" class="count">0</span></button>
           <button data-view="network" aria-selected="false">Network</button>
+          <button data-view="migrations" aria-selected="false">Migrations</button>
         </nav>
       </header>
       <main>
         <div id="notice" class="notice" role="alert" hidden></div>
-        <section id="migrations" class="view">
-          <div class="section-heading"><h2>Migration campaigns</h2><button id="new-campaign">New campaign</button></div>
-          <p class="muted">Progress describes observed devices. Devices never seen by this collector cannot be confirmed.</p>
-          <div id="campaign-list"></div>
-        </section>
-        <section id="clients" class="view" hidden>
+        <section id="clients" class="view">
           <div class="section-heading"><h2>Known clients</h2><label class="search-label"><span class="sr-only">Search clients</span><input id="client-search" type="search" placeholder="Search name, MAC, SSID or AP"></label></div>
           <div id="clients-table"></div>
         </section>
@@ -49,6 +45,11 @@ class ArubaMonitorPanel extends HTMLElement {
           <div id="network-summary" class="stats"></div>
           <div class="section-heading"><h2>Access points</h2></div><div id="ap-list" class="ap-grid"></div>
           <div class="section-heading"><h2>SSIDs</h2></div><div id="ssid-list"></div>
+        </section>
+        <section id="migrations" class="view" hidden>
+          <div class="section-heading"><h2>Migration campaigns</h2><button id="new-campaign">New campaign</button></div>
+          <p class="muted">Progress describes observed devices. Devices never seen by this collector cannot be confirmed.</p>
+          <div id="campaign-list"></div>
         </section>
       </main>
       <footer>
@@ -93,6 +94,7 @@ class ArubaMonitorPanel extends HTMLElement {
   disconnectedCallback() {
     this.mounted = false;
     this.generation += 1;
+    this.deviceRequest += 1;
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
   }
@@ -194,6 +196,7 @@ class ArubaMonitorPanel extends HTMLElement {
     this.openDevice = id;
     const otherMacs = this.data.clients.filter(item => item.id !== id).flatMap(item => item.macs.map(mac => ({mac, name: title(item)})));
     this.$("#device-content").innerHTML = `<div class="section-heading"><div><h2>${e(title(client))}</h2><p class="muted">First seen ${e(stamp(client.first_seen))}</p></div><button class="icon-button" data-close="device-dialog" aria-label="Close">×</button></div>
+      <h3>Home Assistant devices</h3><div id="device-ha-links" aria-live="polite"><p class="muted">Loading devices…</p></div>
       <form id="label-form"><label for="device-label">Device label</label><div class="form-row"><input id="device-label" name="label" maxlength="100" value="${e(client.label)}" placeholder="Give this device a recognizable name"><button>Save</button></div></form>
       <h3>MAC identities</h3><p class="muted">Link only MACs you have verified belong to this device. Migration evidence is recalculated; observations are preserved.</p>
       ${client.macs.map(mac => `<div class="alias-row"><span class="mono">${e(mac)}</span>${client.macs.length > 1 ? `<button class="secondary" data-unlink="${e(mac)}">Unlink</button>` : ""}</div>`).join("")}
@@ -202,6 +205,24 @@ class ArubaMonitorPanel extends HTMLElement {
     if (draft !== undefined) this.$("#device-label").value = draft;
     const select = this.$("#alias-mac");
     if (select && Array.from(select.options).some(option => option.value === selectedMac)) select.value = selectedMac;
+    return this.loadDeviceLinks(id);
+  }
+
+  async loadDeviceLinks(id) {
+    const request = ++this.deviceRequest;
+    const generation = this.generation;
+    const current = () => this.mounted && this.generation === generation && this.deviceRequest === request && this.openDevice === id && this.$("#device-dialog").open;
+    try {
+      const result = await Promise.resolve().then(() => this.command("client_devices", {device_id: id}));
+      if (!current()) return;
+      const rows = devices => devices.map(device => `<div class="ha-device-row"><div><strong>${e(device.name)}</strong><small class="muted">${e(device.integration)} · ${device.macs.map(e).join(", ")}</small></div><a class="ha-device-link" href="/config/devices/device/${e(encodeURIComponent(device.id))}">Open device</a></div>`).join("");
+      this.$("#device-ha-links").innerHTML =
+        (result.devices.length ? rows(result.devices) : '<p class="muted">This client’s Home Assistant device is not registered yet.</p>') +
+        '<h3>Linked devices</h3>' +
+        (result.linked_devices.length ? '<p class="muted">Matched by MAC address.</p>' + rows(result.linked_devices) : '<p class="muted">No linked Home Assistant devices found.</p>');
+    } catch (_error) {
+      if (current()) this.$("#device-ha-links").innerHTML = '<p class="error">Could not load Home Assistant devices.</p><button class="secondary" data-retry-device-links="true">Retry</button>';
+    }
   }
 
   editing() {
@@ -271,8 +292,13 @@ class ArubaMonitorPanel extends HTMLElement {
         this.$("#campaign-error").textContent = "";
         this.$("#campaign-dialog").showModal();
       } else if (button.dataset.device) {
-        this.renderDevice(button.dataset.device);
+        const request = this.renderDevice(button.dataset.device);
         this.$("#device-dialog").showModal();
+        await request;
+      } else if (button.dataset.retryDeviceLinks) {
+        button.disabled = true;
+        try { await this.loadDeviceLinks(this.openDevice); }
+        finally { button.disabled = false; }
       } else if (button.dataset.deleteCampaign) {
         const id = button.dataset.deleteCampaign;
         const campaign = this.data.campaigns.find(item => item.id === id);

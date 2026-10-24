@@ -297,3 +297,116 @@ test("synchronous connection failures do not leave refresh permanently in flight
   await panel.refresh();
   assert.equal(panel.$("#notice").hidden, true);
 });
+
+test("clients open first, network follows, and migrations is last", () => {
+  const {panel, root} = setup();
+  assert.equal(panel.view, "clients");
+  const tabs = Array.from(root.innerHTML.matchAll(/<button data-view="([^"]+)" aria-selected="([^"]+)"/g), match => [match[1], match[2]]);
+  assert.deepEqual(tabs, [["clients", "true"], ["network", "false"], ["migrations", "false"]]);
+  assert.match(root.innerHTML, /<section id="clients" class="view">/);
+  assert.match(root.innerHTML, /<section id="migrations" class="view" hidden>/);
+});
+
+function haDevices(name = "Kitchen speaker") {
+  return {
+    devices: [{id: "aruba-device", name, macs: ["aa:bb:cc:00:00:00"], integration: "aruba_monitor"}],
+    linked_devices: [{id: "speaker-device", name: "Speaker integration", macs: ["aa:bb:cc:00:00:00"], integration: "speaker"}],
+  };
+}
+
+test("opening a client offers HA device and linked device navigation with escaped names", async () => {
+  const {panel, calls} = setup();
+  panel._hass.callWS = async message => {
+    calls.push(["ws", JSON.parse(JSON.stringify(message))]);
+    const result = haDevices('<img src=x onerror="bad()">');
+    result.linked_devices[0].id = 'id/with"quotes';
+    return result;
+  };
+  await click(panel, {device: "device-0"}).run();
+  assert.equal(panel.$("#device-dialog").open, true);
+  assert.deepEqual(calls, [["ws", {type: "aruba_monitor/client_devices", device_id: "device-0"}]]);
+  const html = panel.$("#device-ha-links").innerHTML;
+  assert.match(html, /href="\/config\/devices\/device\/aruba-device"/);
+  assert.match(html, /href="\/config\/devices\/device\/id%2Fwith%22quotes"/);
+  assert.match(html, /Linked devices/);
+  assert.match(html, /Speaker integration/);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /&lt;img/);
+  assert.equal((html.match(/Open device/g) || []).length, 2);
+});
+
+test("an absent registry device and no matching links have clear empty states", async () => {
+  const {panel} = setup();
+  panel._hass.callWS = async () => ({devices: [], linked_devices: []});
+  await click(panel, {device: "device-0"}).run();
+  const html = panel.$("#device-ha-links").innerHTML;
+  assert.match(html, /not registered yet/);
+  assert.match(html, /No linked Home Assistant devices found/);
+  assert.doesNotMatch(html, /href=/);
+});
+
+test("device lookup failure can be retried without replacing client form drafts", async () => {
+  const {panel} = setup();
+  panel._hass.callWS = async () => { throw new Error("Disconnected"); };
+  await click(panel, {device: "device-0"}).run();
+  assert.match(panel.$("#device-ha-links").innerHTML, /Could not load/);
+  panel.$("#device-label").value = "Unsaved label";
+  panel.$("#alias-mac").value = "aa:bb:cc:00:00:02";
+  panel._hass.callWS = async () => haDevices();
+  await click(panel, {retryDeviceLinks: "true"}).run();
+  assert.match(panel.$("#device-ha-links").innerHTML, /Open device/);
+  assert.equal(panel.$("#device-label").value, "Unsaved label");
+  assert.equal(panel.$("#alias-mac").value, "aa:bb:cc:00:00:02");
+});
+
+test("older device lookups cannot overwrite another client or a closed or unmounted dialog", async () => {
+  const {panel} = setup();
+  const pending = [];
+  panel._hass.callWS = () => new Promise(resolve => pending.push(resolve));
+  const first = click(panel, {device: "device-0"}).run();
+  const second = click(panel, {device: "device-1"}).run();
+  await Promise.resolve();
+  pending[1](haDevices("Current client"));
+  await second;
+  pending[0](haDevices("Wrong client"));
+  await first;
+  assert.match(panel.$("#device-ha-links").innerHTML, /Current client/);
+  assert.doesNotMatch(panel.$("#device-ha-links").innerHTML, /Wrong client/);
+  const third = panel.loadDeviceLinks("device-1");
+  panel.$("#device-dialog").close();
+  await Promise.resolve();
+  pending[2](haDevices("Closed client"));
+  await third;
+  assert.doesNotMatch(panel.$("#device-ha-links").innerHTML, /Closed client/);
+  panel.$("#device-dialog").showModal();
+  const fourth = panel.loadDeviceLinks("device-1");
+  panel.disconnectedCallback();
+  await Promise.resolve();
+  pending[3](haDevices("Unmounted client"));
+  await fourth;
+  assert.doesNotMatch(panel.$("#device-ha-links").innerHTML, /Unmounted client/);
+});
+
+test("five-second refresh preserves client links, forms and dialog scroll", async () => {
+  const {panel} = setup();
+  panel._hass.callWS = async () => haDevices();
+  await click(panel, {device: "device-0"}).run();
+  const links = panel.$("#device-ha-links").innerHTML;
+  panel.$("#device-label").value = "Draft label";
+  panel.$("#device-dialog").scrollTop = 125;
+  panel._hass.callWS = async () => snapshot();
+  await panel.refresh();
+  assert.equal(panel.$("#device-ha-links").innerHTML, links);
+  assert.equal(panel.$("#device-label").value, "Draft label");
+  assert.equal(panel.$("#device-dialog").scrollTop, 125);
+});
+
+
+test("a synchronous HA connection error leaves a retryable device lookup", async () => {
+  const {panel} = setup();
+  panel._hass.callWS = () => { throw new Error("Connection unavailable"); };
+  await click(panel, {device: "device-0"}).run();
+  assert.equal(panel.$("#device-dialog").open, true);
+  assert.match(panel.$("#device-ha-links").innerHTML, /Could not load/);
+  assert.match(panel.$("#device-ha-links").innerHTML, /Retry/);
+});

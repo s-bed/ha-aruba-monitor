@@ -6,11 +6,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.components import websocket_api
+from homeassistant.helpers import device_registry as dr
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.aruba_monitor.aruba import ArubaClient
 from custom_components.aruba_monitor.const import DOMAIN
+from custom_components.aruba_monitor.store import ssid_id
 from custom_components.aruba_monitor.websocket import COMMAND_FIELDS, async_register_commands
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
@@ -104,6 +106,126 @@ async def test_admin_snapshot_uses_cache_without_collecting(hass, hass_ws_client
     assert snapshot["total_clients"] == 3
     assert snapshot["status"]["fresh"] is True
     collect.assert_not_awaited()
+
+
+def client_device(hass, monitor, mac):
+    """Find the actual per-MAC native HA record, independently of panel grouping."""
+    return dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, f"aruba_home_client_{ssid_id(mac)}"), monitor.entry_id
+    )
+
+
+@pytest.mark.parametrize("foreign_first", [True, False], ids=["existing-match", "later-match"])
+async def test_client_devices_read_native_and_normalized_mac_links_from_cache(
+    hass, hass_ws_client, monitor, foreign_first
+):
+    client = await hass_ws_client(hass)
+    registry = dr.async_get(hass)
+    retained = next(c for c in monitor.runtime_data.snapshot["clients"] if c["macs"] == ["aa:bb:cc:00:00:01"])
+    native = client_device(hass, monitor, retained["macs"][0])
+    foreign_entry = MockConfigEntry(domain="test", data={"password": "private-device-setting"})
+    foreign_entry.add_to_hass(hass)
+    if not foreign_first:
+        initial = await successful(client, "client_devices", device_id=retained["id"])
+        assert initial["linked_devices"] == []
+    foreign = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "speaker-serial")},
+        connections={(dr.CONNECTION_NETWORK_MAC, "AA-BB-CC-00-00-01")},
+        name="Original device name",
+        manufacturer="Manufacturer",
+        model="Model",
+    )
+    foreign = registry.async_update_device(foreign.id, name_by_user="<Kitchen speaker>")
+    with (
+        patch.object(monitor.runtime_data.client, "collect", new_callable=AsyncMock) as collect,
+        patch.object(monitor.runtime_data, "async_snapshot", new_callable=AsyncMock) as snapshot,
+    ):
+        result = await successful(client, "client_devices", device_id=retained["id"])
+    assert result == {
+        "devices": [{"id": native.id, "name": native.name, "macs": retained["macs"], "integration": DOMAIN}],
+        "linked_devices": [
+            {"id": foreign.id, "name": "<Kitchen speaker>", "macs": retained["macs"], "integration": "test"}
+        ],
+    }
+    collect.assert_not_awaited()
+    snapshot.assert_not_awaited()
+    assert "private-device-setting" not in str(result)
+    assert registry.async_get(foreign.id) is foreign
+    registry.async_remove_device(foreign.id)
+    assert (await successful(client, "client_devices", device_id=retained["id"]))["linked_devices"] == []
+
+
+async def test_client_devices_grouped_macs_keep_native_records_and_deduplicate_shared_links(
+    hass, hass_ws_client, monitor
+):
+    client = await hass_ws_client(hass)
+    clients = monitor.runtime_data.snapshot["clients"]
+    original = next(c for c in clients if c["macs"] == ["aa:bb:cc:00:00:01"])
+    second = next(c for c in clients if c["macs"] == ["aa:bb:cc:00:00:02"])
+    native_ids = {client_device(hass, monitor, value).id for value in [*original["macs"], *second["macs"]]}
+    await successful(client, "client_link", device_id=original["id"], mac=second["macs"][0])
+    foreign_entry = MockConfigEntry(domain="test")
+    foreign_entry.add_to_hass(hass)
+    registry = dr.async_get(hass)
+    foreign = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "shared-device")},
+        connections={
+            (dr.CONNECTION_NETWORK_MAC, "AA:BB:CC:00:00:01"),
+            (dr.CONNECTION_NETWORK_MAC, "aa-bb-cc-00-00-02"),
+            (dr.CONNECTION_NETWORK_MAC, "aa:bb:cc:00:00:99"),
+        },
+        name="One physical device",
+    )
+    unrelated = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "same-hostname")},
+        connections={(dr.CONNECTION_NETWORK_MAC, "aa:bb:cc:00:00:98")},
+        name=original["name"],
+    )
+    result = await successful(client, "client_devices", device_id=original["id"])
+    assert {device["id"] for device in result["devices"]} == native_ids
+    assert result["linked_devices"] == [
+        {
+            "id": foreign.id,
+            "name": "One physical device",
+            "macs": sorted([*original["macs"], *second["macs"]]),
+            "integration": "test",
+        }
+    ]
+    assert unrelated.id not in str(result)
+
+
+async def test_client_devices_missing_native_record_still_resolves_exact_foreign_mac(
+    hass, hass_ws_client, monitor
+):
+    client = await hass_ws_client(hass)
+    retained = monitor.runtime_data.snapshot["clients"][0]
+    registry = dr.async_get(hass)
+    registry.async_remove_device(client_device(hass, monitor, retained["macs"][0]).id)
+    assert await successful(client, "client_devices", device_id=retained["id"]) == {
+        "devices": [],
+        "linked_devices": [],
+    }
+    foreign_entry = MockConfigEntry(domain="test")
+    foreign_entry.add_to_hass(hass)
+    foreign = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "unnamed-device")},
+        connections={(dr.CONNECTION_NETWORK_MAC, retained["macs"][0])},
+    )
+    foreign = registry.async_update_device(foreign.id, name=None)
+    result = await successful(client, "client_devices", device_id=retained["id"])
+    assert result == {
+        "devices": [],
+        "linked_devices": [
+            {"id": foreign.id, "name": retained["macs"][0], "macs": retained["macs"], "integration": "test"}
+        ],
+    }
+    response = await command(client, "client_devices", device_id="missing")
+    assert response["success"] is False
+    assert response["error"] == {"code": "invalid_operation", "message": "Unknown client"}
 
 
 async def test_panel_hidden_from_nonadmin_frontend_listing(

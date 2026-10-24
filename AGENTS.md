@@ -74,9 +74,11 @@ without a concrete need. Store UTC timestamps and display browser-local times.
 
 ## Campaign and panel behavior
 
-Preserve the Migrations, Clients, and Network views; HA theme styling; fixed
-header/footer with interior scrolling; local assets; and no frontend build
-pipeline. Campaign client lists start collapsed and expand independently. Keep
+Keep Clients first and selected by default, Network second, and Migrations last.
+Client details must link to native HA devices and list devices sharing exact
+MAC connections, without controller polling or changing registry records.
+Preserve HA theme styling, fixed header/footer with interior scrolling, local
+assets, and no frontend build pipeline. Campaign client lists start collapsed and expand independently. Keep
 campaign actions and counts visible when collapsed. Default to **Pending &
 returned**, with per-campaign filters and four-pixel progress bars. Preserve form
 entry, filter/search values, expansion, and scroll state on five-second refresh.
