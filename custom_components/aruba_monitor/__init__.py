@@ -117,7 +117,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             sidebar_icon="mdi:wifi",
             require_admin=True,
             module_url=f"{FRONTEND_URL}/panel.js?v={VERSION}",
-            config_panel_domain=DOMAIN,
         )
     except Exception:
         if platforms_loaded:

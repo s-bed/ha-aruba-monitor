@@ -76,6 +76,14 @@ async def test_full_setup_registers_admin_panel_and_native_entities(hass, tmp_pa
     assert (tmp_path / DOMAIN / "aruba.sqlite3").is_file()
     panel = hass.data[frontend.DATA_PANELS][PANEL_URL]
     assert panel.require_admin is True
+    # A configuration panel overrides HA's Configure button and hides Options.
+    assert panel.config_panel_domain is None
+    assert entry.supports_options is True
+    options = await hass.config_entries.options.async_init(entry.entry_id)
+    assert options["step_id"] == "init"
+    assert {"auto_delete_clients", "client_retention_days", "auto_delete_ssids", "ssid_retention_days"} <= {
+        key.schema for key in options["data_schema"].schema
+    }
     assert panel.config["_panel_custom"]["name"] == "aruba-monitor-panel"
     assert panel.config["_panel_custom"]["embed_iframe"] is False
     assert panel.config["_panel_custom"]["module_url"].startswith(f"{FRONTEND_URL}/panel.js?")

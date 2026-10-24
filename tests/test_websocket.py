@@ -407,6 +407,7 @@ async def test_panel_hidden_from_nonadmin_frontend_listing(
     await admin.send_json_auto_id({"type": "get_panels"})
     admin_panels = await admin.receive_json()
     assert "aruba-monitor" in admin_panels["result"]
+    assert admin_panels["result"]["aruba-monitor"]["config_panel_domain"] is None
     user = await hass_ws_client(hass, access_token=hass_read_only_access_token)
     await user.send_json_auto_id({"type": "get_panels"})
     panels = await user.receive_json()
