@@ -4,6 +4,7 @@ import json
 import subprocess
 import zipfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from awesomeversion import AwesomeVersion
@@ -132,7 +133,8 @@ class FakeGitHub(preview.GitHub):
     def __init__(self, head, release=None):
         super().__init__("owner/repo")
         self.head = head
-        self.release = release
+        self.release = {"tag_name": "pr-3", **release} if release is not None else None
+        self.other_releases = []
         self.state = "open"
         self.base = "main"
         self.base_repo = self.repository
@@ -151,11 +153,22 @@ class FakeGitHub(preview.GitHub):
                 "state": self.state,
                 "base": {"ref": self.base, "repo": {"full_name": self.base_repo}},
             }
-        if method == "GET":
-            return self.release
+        if method == "GET" and path.startswith("releases/tags/"):
+            # GitHub's tag lookup is published-only, even with push access.
+            if self.release and not self.release.get("draft", False):
+                assert self.release["tag_name"] == path.removeprefix("releases/tags/")
+                return self.release
+            return None
+        if method == "GET" and path.startswith("releases?"):
+            query = parse_qs(urlsplit(path).query)
+            size, page = int(query["per_page"][0]), int(query["page"][0])
+            releases = self.other_releases + ([self.release] if self.release else [])
+            return releases[(page - 1) * size : page * size]
         if method == "POST":
+            assert self.release is None, "Attempted to create a duplicate draft release"
             self.release = {"id": 123, **payload}
             return self.release
+        assert method == "PATCH" and path == f"releases/{self.release['id']}"
         self.release.update(payload)
         return self.release
 
@@ -230,13 +243,15 @@ def test_manual_run_uses_current_open_head(repository, tmp_path, uploads):
     assert len(uploads) == 1
 
 
-def test_same_head_old_rerun_preserves_newer_manual_preview(repository, tmp_path, uploads):
+@pytest.mark.parametrize("draft", [False, True])
+def test_same_head_old_rerun_preserves_newer_manual_preview(repository, tmp_path, uploads, draft):
     head = head_change(repository)
     github = FakeGitHub(head)
     output = tmp_path / "aruba_monitor.zip"
     first = preview.publish(repository, github, 3, head, 123, output, run_number=1)
     newer = preview.publish(repository, github, 3, "", 124, output, run_number=2)
     assert first["version"] != newer["version"]
+    github.release["draft"] = draft
     release = github.release.copy()
     github.calls.clear()
 
@@ -248,13 +263,16 @@ def test_same_head_old_rerun_preserves_newer_manual_preview(repository, tmp_path
     assert preview.text_git(repository, "ls-remote", "origin", "refs/tags/pr-3").split()[0] == newer["sha"]
 
 
-def test_same_run_rerun_reuses_version_and_repairs_its_release(repository, tmp_path, uploads):
+@pytest.mark.parametrize("padding", [0, 100])
+def test_same_run_rerun_reuses_version_and_repairs_its_release(repository, tmp_path, uploads, padding):
     head = head_change(repository)
     github = FakeGitHub(head)
     output = tmp_path / "aruba_monitor.zip"
     first = preview.publish(repository, github, 3, head, 123, output, run_number=1)
     release_id = github.release["id"]
     github.release["draft"] = True
+    github.other_releases = [{"tag_name": f"v1.0.{i}"} for i in range(padding)]
+    github.calls.clear()
 
     rerun = preview.publish(repository, github, 3, head, 123, output, run_number=1)
 
@@ -262,11 +280,68 @@ def test_same_run_rerun_reuses_version_and_repairs_its_release(repository, tmp_p
     assert github.release["id"] == release_id
     assert github.release["draft"] is False
     assert len(uploads) == 2
+    assert not any(method == "POST" for method, _, _ in github.calls)
+    assert ("GET", f"releases?per_page=100&page={1 + padding // 100}", None) in github.calls
 
 
-def test_unmarked_reserved_prerelease_is_not_overwritten(repository, tmp_path, uploads):
+@pytest.mark.parametrize("existing", [False, True])
+def test_failed_upload_recovers_same_draft_and_preserves_newer_run(
+    repository, tmp_path, uploads, monkeypatch, existing
+):
     head = head_change(repository)
-    github = FakeGitHub(head, {"id": 123, "prerelease": True, "body": "A manually created prerelease"})
+    github = FakeGitHub(head)
+    output = tmp_path / "aruba_monitor.zip"
+    if existing:
+        preview.publish(repository, github, 3, head, 123, output, run_number=1)
+    run = preview.subprocess.run
+
+    def fail_upload(command, **kwargs):
+        if command[0] == "gh":
+            raise subprocess.CalledProcessError(1, command)
+        return run(command, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(preview.subprocess, "run", fail_upload)
+        with pytest.raises(subprocess.CalledProcessError):
+            preview.publish(repository, github, 3, head, 124, output, run_number=2)
+    release = github.release.copy()
+    tag = preview.text_git(repository, "ls-remote", "origin", "refs/tags/pr-3")
+    assert release["draft"] is True
+    assert f"pr=3 run=124 sequence=2 head={head}" in release["body"]
+    github.calls.clear()
+
+    assert preview.publish(repository, github, 3, head, 123, output, run_number=1) is None
+    assert github.release == release
+    assert all(method == "GET" for method, _, _ in github.calls)
+    assert preview.text_git(repository, "ls-remote", "origin", "refs/tags/pr-3") == tag
+
+    repaired = preview.publish(repository, github, 3, head, 124, output, run_number=2)
+    assert repaired is not None
+    assert github.release["id"] == release["id"]
+    assert github.release["draft"] is False
+    assert len(uploads) == 1 + existing
+    assert not any(method == "POST" for method, _, _ in github.calls)
+    assert preview.text_git(repository, "ls-remote", "origin", "refs/tags/pr-3") == tag
+
+
+def test_missing_release_checks_all_listing_pages():
+    github = FakeGitHub("a" * 40)
+    github.other_releases = [{"tag_name": f"v1.0.{i}"} for i in range(100)]
+
+    assert github.find_release("pr-3") is None
+    assert github.calls == [
+        ("GET", "releases/tags/pr-3", None),
+        ("GET", "releases?per_page=100&page=1", None),
+        ("GET", "releases?per_page=100&page=2", None),
+    ]
+
+
+@pytest.mark.parametrize("draft", [False, True])
+def test_unmarked_reserved_prerelease_is_not_overwritten(repository, tmp_path, uploads, draft):
+    head = head_change(repository)
+    github = FakeGitHub(
+        head, {"id": 123, "prerelease": True, "body": "A manually created prerelease", "draft": draft}
+    )
     with pytest.raises(ValueError, match="does not belong to this PR preview"):
         preview.publish(repository, github, 3, head, 123, tmp_path / "preview.zip", run_number=1)
     assert uploads == []
@@ -290,14 +365,29 @@ def test_head_change_during_upload_leaves_preview_hidden_until_new_run(repositor
     assert preview.publish(repository, github, 3, head, 123, tmp_path / "preview.zip", run_number=1) is None
     assert len(uploads) == 1
     assert github.release["draft"] is True
+    release_id = github.release["id"]
+    new_head = head_change(repository, content="// next PR head\n")
+    github.change_after = None
+    github.head = new_head
+    github.calls.clear()
+
+    assert preview.publish(repository, github, 3, new_head, 124, tmp_path / "preview.zip", run_number=2)
+    assert len(uploads) == 2
+    assert github.release["id"] == release_id
+    assert github.release["draft"] is False
+    assert f"`{new_head}`" in github.release["body"]
+    assert not any(method == "POST" for method, _, _ in github.calls)
 
 
+@pytest.mark.parametrize("draft", [False, True])
 @pytest.mark.parametrize(
     "release", [{"id": 123, "prerelease": False}, {"id": 123, "prerelease": True, "immutable": True}]
 )
-def test_existing_stable_or_immutable_release_is_not_overwritten(repository, tmp_path, uploads, release):
+def test_existing_stable_or_immutable_release_is_not_overwritten(
+    repository, tmp_path, uploads, release, draft
+):
     head = head_change(repository)
-    github = FakeGitHub(head, release)
+    github = FakeGitHub(head, {**release, "draft": draft})
     with pytest.raises(ValueError, match="mutable prerelease"):
         preview.publish(repository, github, 3, head, 123, tmp_path / "preview.zip", run_number=1)
     assert uploads == []

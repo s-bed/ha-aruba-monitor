@@ -173,6 +173,21 @@ class GitHub:
             return None
         return head
 
+    def find_release(self, tag: str) -> dict | None:
+        """Find published previews or drafts left by an interrupted publication."""
+        if release := self.api("GET", f"releases/tags/{tag}", missing=True):
+            return release
+        # The tag endpoint only returns published releases. Authenticated release
+        # listings include drafts, which must pass the same ownership/run checks.
+        page = 1
+        while True:
+            releases = self.api("GET", f"releases?per_page=100&page={page}")
+            if release := next((item for item in releases if item["tag_name"] == tag), None):
+                return release
+            if len(releases) < 100:
+                return None
+            page += 1
+
 
 def publish(
     root: Path,
@@ -197,30 +212,6 @@ def publish(
     if github.current(pr, head) is None:
         return None
     tag = preview["tag"]
-    release = github.api("GET", f"releases/tags/{tag}", missing=True)
-    if release is not None:
-        if not release["prerelease"] or release.get("immutable", False):
-            raise ValueError("Rolling preview requires a mutable prerelease at its reserved PR tag")
-        marker = RELEASE_MARKER.search(release.get("body") or "")
-        if marker is None or int(marker[1]) != pr:
-            raise ValueError("Existing release does not belong to this PR preview workflow")
-        # The PR head may be unchanged after a newer manual run. Checking head
-        # alone would let an older event rerun roll back the installed version.
-        # GitHub guarantees run_number increases and remains fixed on reruns.
-        if int(marker[3]) > run_number:
-            return None
-        if int(marker[3]) == run_number and int(marker[2]) != run_id:
-            raise ValueError("Preview workflow run number belongs to a different run")
-        github.api("PATCH", f"releases/{release['id']}", {"draft": True, "make_latest": "false"})
-    ref = f"refs/tags/{tag}"
-    previous = text_git(root, "ls-remote", "--refs", "origin", ref).split()
-    git(
-        root,
-        "push",
-        f"--force-with-lease={ref}:{previous[0] if previous else ''}",
-        "origin",
-        f"{preview['sha']}:{ref}",
-    )
     metadata = {
         "tag_name": tag,
         "name": f"PR #{pr} preview",
@@ -237,6 +228,32 @@ def publish(
         "prerelease": True,
         "make_latest": "false",
     }
+    release = github.find_release(tag)
+    if release is not None:
+        if not release["prerelease"] or release.get("immutable", False):
+            raise ValueError("Rolling preview requires a mutable prerelease at its reserved PR tag")
+        marker = RELEASE_MARKER.search(release.get("body") or "")
+        if marker is None or int(marker[1]) != pr:
+            raise ValueError("Existing release does not belong to this PR preview workflow")
+        # The PR head may be unchanged after a newer manual run. Checking head
+        # alone would let an older event rerun roll back the installed version.
+        # GitHub guarantees run_number increases and remains fixed on reruns.
+        if int(marker[3]) > run_number:
+            return None
+        if int(marker[3]) == run_number and int(marker[2]) != run_id:
+            raise ValueError("Preview workflow run number belongs to a different run")
+        # Record the in-progress run before changing its tag or ZIP so an older
+        # rerun cannot replace a newer preview whose upload was interrupted.
+        github.api("PATCH", f"releases/{release['id']}", metadata)
+    ref = f"refs/tags/{tag}"
+    previous = text_git(root, "ls-remote", "--refs", "origin", ref).split()
+    git(
+        root,
+        "push",
+        f"--force-with-lease={ref}:{previous[0] if previous else ''}",
+        "origin",
+        f"{preview['sha']}:{ref}",
+    )
     if release is None:
         release = github.api("POST", "releases", metadata)
     # gh streams the ZIP without interpreting any file from the pull request.
