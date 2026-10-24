@@ -1,144 +1,52 @@
 # Aruba Monitor for Home Assistant
 
-A native, local-polling Home Assistant integration for an **Aruba Instant AOS-8 virtual controller**. Monitor APs, radios and SSIDs, and track devices during an SSID/password migration directly in Home Assistant.
+Monitor Aruba Wi-Fi access points, SSIDs and clients in Home Assistant, with native presence trackers and an admin panel for tracking SSID migrations. Collection is local and read-only.
 
-The integration observes the network. It never changes SSIDs, rotates passwords, disconnects clients or configures APs. Instant **8.10.0.16** has been smoke-tested; other firmware is not established as supported by synthetic tests alone. Aruba Central, Instant On, AOS-10 and Mobility Controllers are outside this implementation.
+## Prerequisites
+
+- **Home Assistant 2026.10.0 or newer**.
+- One **Aruba Instant AOS-8 virtual controller**. Instant **8.10.0.16** is smoke-tested. Aruba Central, Instant On, AOS-10 and Mobility Controllers are outside this implementation.
+- Home Assistant can reach the controller's HTTPS port (default **4343**), with credentials allowed to run `show version`, `show clients`, `show aps` and `show network`.
+
+Enable the REST API from the Instant AP CLI in configuration mode, then save and apply:
+
+```text
+(Instant AP)(config)# allow-rest-api
+(Instant AP)(config)# end
+(Instant AP)# commit apply
+```
 
 ## Install
 
-Requires **Home Assistant 2026.10.0 or newer**. One controller/integration entry is supported.
+**HACS:** Open **Custom repositories**, add `https://github.com/s-bed/ha-aruba-monitor` as an **Integration**, download **Aruba Monitor**, and restart Home Assistant. This is a custom repository, not part of the default HACS catalogue.
 
-### HACS custom repository
-
-1. In HACS, open **Custom repositories**, add `https://github.com/s-bed/ha-aruba-monitor`, and select **Integration**.
-2. Download **Aruba Monitor** and restart Home Assistant.
-3. Open **Settings → Devices & services → Add integration → Aruba Monitor**.
-
-This integration is available as a HACS custom repository; it is not listed in the default HACS catalogue.
-
-### Manual
-
-Copy `custom_components/aruba_monitor` to `<HA config>/custom_components/aruba_monitor`, then restart Home Assistant and add the integration. Everything needed at runtime, including the panel assets, is inside that folder. There is no frontend build step.
+**Manual:** Copy `custom_components/aruba_monitor` into `<HA config>/custom_components/aruba_monitor` and restart Home Assistant. You can also extract `aruba_monitor.zip` from the [latest release](https://github.com/s-bed/ha-aruba-monitor/releases/latest) into `<HA config>/custom_components`.
 
 ## Configure
 
-Home Assistant must be able to reach the controller's HTTPS port and authenticate to its local REST API. Setup reads `show version` and validates `show clients`, `show aps` and `show network` through `/rest/show-cmd` before accepting the entry. Use controller credentials that can run these commands. Configuration is through the Home Assistant UI; no YAML configuration is required.
+1. Open **Settings → Devices & services → Add integration → Aruba Monitor**.
+2. Enter the controller hostname/IP **without a URL scheme or port**, credentials and a site ID (default `home`). Keep the site ID stable; it determines entity identities.
+3. Set the HTTPS port separately. Keep TLS verification enabled; provide a CA file accessible inside Home Assistant if your controller needs one. The Instant AP IP field is optional and otherwise resolved automatically.
 
-The initial setup form contains:
+Setup checks the connection and required controller tables. No YAML or extra service is needed.
 
-| Setting | Default | Guidance |
-| --- | --- | --- |
-| Site ID | `home` | Use 1–64 letters, digits, hyphens or underscores. Keep it stable: it determines entity identities and cannot be changed through reconfiguration. |
-| Virtual controller hostname or IP | Required | Enter only the hostname or IP, without a URL scheme, path or port. |
-| HTTPS port | `4343` | Set the port separately from the controller address. |
-| Instant AP IP address | Automatic | Optional explicit IP for show commands. Otherwise the integration resolves an IPv4 address from the controller hostname. |
-| Username and password | Required | Credentials for the local controller. |
-| Verify TLS certificate | Enabled | Validates the controller certificate. |
-| CA certificate file path | Empty | Optional CA file accessible inside Home Assistant. Paths refer to the HA host/container filesystem, not your browser's computer. |
+Use **Reconfigure** on the integration entry to change connection settings or credentials. Use **Options** for polling, tracking and cleanup:
 
-In **Settings → Devices & services**, open Aruba Monitor's entry menu and use **Reconfigure** to change the connection, TLS settings or credentials. Leave the password blank to keep the saved password. Invalid credentials during operation start Home Assistant's reauthentication flow.
+- Polling defaults to **30 seconds**, adjustable from **10–300 seconds**.
+- New presence trackers are **disabled by default**. Enable chosen trackers from their device's entity list, or turn on **Track new devices** for future discoveries.
+- Inactive client cleanup is **on after 30 days**. Enabled trackers, explicit cleanup protection and campaign references protect clients from automatic deletion. SSID cleanup is **off** by default.
 
-Use **Options** to change:
+## Use the panel
 
-| Option | Default | Allowed values or behavior |
-| --- | --- | --- |
-| Track new devices | Off | Enables presence trackers when first registered. Existing entity enable/disable choices are preserved. |
-| Polling interval | 30 seconds | 10–300 seconds. |
-| HTTP request timeout | 15 seconds | Any positive number of seconds, applied to each request. |
-| Automatically delete inactive clients | On | Deletes eligible absent clients after successful collections. Campaign references, explicit protection and enabled trackers prevent automatic deletion. |
-| Client inactivity period | 30 days | Positive whole number of days. |
-| Automatically delete inactive SSIDs | Off | Deletes eligible SSIDs no longer reported or used by observed clients. |
-| SSID inactivity period | 30 days | Positive whole number of days, independent of client retention. |
+Open **Aruba Monitor** in the Home Assistant sidebar as an administrator:
 
-Polling continues with all entities disabled and the panel closed. Monitoring pauses when Home Assistant is stopped or restarted. Do not run two collectors against the same controller during normal use.
+- **Clients:** Browse current and retained clients, view their history, and link them to Home Assistant devices by MAC address.
+- **Network:** See APs, radios, SSIDs and connection counts. Native entities expose these statistics for dashboards and automations.
+- **Migrations:** Choose different source and target SSIDs to track observed devices leaving the source network. Any later non-source SSID counts as migrated; going offline does not. Completion is manual, and 100% covers only observed devices. A password change on the same SSID cannot be verified this way.
 
-### Updating an existing installation
+Polling continues with the panel closed and all entities disabled. History is stored in `<HA config>/aruba_monitor/aruba.sqlite3` and retained when the integration entry is removed.
 
-Current configuration entries use version 2 and keep their saved settings when updated. Older configuration-entry versions are not converted automatically: remove the integration entry in **Settings → Devices & services**, then add it again with the same site ID. Removing the entry preserves the retained database and campaign history. Obsolete entities from earlier releases are not removed automatically; remove them manually if needed.
+## More documentation
 
-## Devices, entities and panel
-
-The **Aruba Monitor** sidebar panel is visible to administrators only. Its authenticated backend also restricts all client/campaign reads and writes to administrators.
-
-- **Clients** opens first: retained device inventory and per-MAC/SSID observation history. Click a client for a two-column details popup on desktop: its Aruba Monitor device on the left, and linked devices plus Home Assistant linking on the right. The layout stacks on smaller screens. Click a device card to open it in Home Assistant. Linked devices appear as cards too. Inactive clients remain saved unless explicitly deleted or eligible for enabled automatic cleanup.
-- **Network:** APs, reported radios, discovered SSIDs and connection splits. SSIDs originate from successful controller inventories, including networks with no clients. An SSID that is no longer reported stays in the retained inventory until manually deleted or eligible for enabled automatic cleanup; its current statistics are unavailable. Failed polls preserve the inventory. Deleting an SSID removes its local inventory and Aruba Monitor entities, while client sighting history, campaign evidence and historical SSID suggestions in migration forms remain saved. The health footer remains visible while the content scrolls.
-- **Migrations** is last: create campaigns with exact source/target SSIDs; expand each campaign's clients independently. Lists start collapsed and default to **Pending & returned**. Searches, filters and form entry survive automatic refreshes.
-
-The panel follows the active HA theme and refreshes every five seconds while mounted. Question-mark icons beside Known clients, SSIDs, cleanup protection and client deletion show explanatory help on hover or keyboard focus. These reads do not poll the controller. All frontend assets are local.
-
-The integration provides native entities for:
-
-- Collector connectivity health, last successful collection, and total MAC connections.
-- AP connectivity, client count, and each reported radio's band, channel, power, utilization and noise floor.
-- SSID client totals and splits by AP and by 2.4/5/6 GHz or unknown band.
-- A native **device tracker** for every observed client MAC, reporting `home` while associated with Wi-Fi and `not_home` after leaving. Trackers are disabled by default; enable chosen trackers from the device’s entity list or enable **Track new devices** for future discoveries. Optional IP address, SSID, access point, band, channel, signal-to-noise ratio, link speed and last-seen sensors are disabled by default; enable them from the device’s entity list.
-
-Client devices advertise their network MAC to Home Assistant, which automatically links them to devices from other integrations exposing the same MAC, including devices discovered later. Home Assistant retains each integration’s device record and metadata. In the popup, type under **Link a Home Assistant device** to filter devices by name or integration, choose a result (or use the arrow keys and Enter), then select **Link device** to associate it manually. This adds the client’s observed MAC addresses to that device’s network connections, making the link visible in HA as well as Aruba Monitor; it does not move entities or merge registry records. Conflicting MAC ownership within the selected device’s integration is rejected. The question-mark icon beside the linking field explains the action on hover or focus. MAC grouping controls and the unused device-label input are omitted; existing saved identities, labels and history remain intact. Automatic matching uses the exact MAC, never a hostname; devices with randomized or different interface MACs require separate identities.
-
-Client entities retain stable IDs when names, SSIDs or campaign identity links change. They remain registered when clients disconnect. Retained identity groups affect campaign grouping, not individual MAC entities or network connection counts. AP IDs use serial hashes; SSID IDs hash the exact UTF-8 SSID. AP renames preserve entity identities. Missing metrics remain unknown. Client signal is SNR in dB.
-
-Bands use controller-reported values first. Missing client bands can be resolved from a matching AP and primary radio channel, including bonded-channel suffixes. Model-based channel inference is limited to the documented dual-band AP-324/325, AP-334/335 and AP-534/535 families. Other hardware requires a reported band or an unambiguous match to a radio with a reported band. Unresolved matches remain unknown; channel numbers or radio indexes alone never imply 6 GHz support.
-
-An administrator can manually delete an inactive client or SSID after a fresh successful collection confirms its absence. The panel asks for confirmation because deletion is permanent. Deleting a client removes its retained MAC history and Aruba Monitor entities and device association; Home Assistant records owned by other integrations, including their network connections, remain unchanged. Manual deletion also removes the client’s membership, exclusions and evidence from every active or completed migration campaign in the same transaction and recalculates campaign progress. Other clients and the campaigns themselves remain saved. Automatic cleanup still skips clients referenced by any saved campaign. Enabled presence trackers also protect the entire retained identity from automatic cleanup while away; disabling a tracker removes that exemption. Manual deletion of an eligible inactive client is still allowed. Use **Protect from automatic cleanup** in a client's details to retain that client regardless of its inactivity period; protection does not block an explicit manual deletion. Protection is saved per MAC in the existing database metadata without changing the database schema. If a deleted client or SSID is detected again, the integration recreates it as a newly observed item.
-
-Automatic cleanup runs only after a successful collection and deletes absent clients or SSIDs whose last observation is at least their configured inactivity period ago. Controller outages, failed collections and integration startup without a new successful collection never trigger deletion. Protect clients whose historical records you want to retain beyond the inactivity period.
-
-A failed poll immediately marks collection unhealthy and panel connectivity unknown, and prevents campaign completion or deletion. Presence trackers keep their last home/away state through the first two failed complete collection attempts, after internal authentication/table retries. Three consecutive failures make trackers unavailable until a successful collection; the outage and recovery are each logged once. Rejected credentials make trackers unavailable immediately and start reauthentication. A client that simply leaves remains available as `not_home`. Native statistics retain their last values until collection is stale after three polling intervals; AP statistics additionally require the AP to be online; client statistics require that MAC to be connected in the last successful collection. Client last-seen timestamps remain available as historical values. A separate timer enforces staleness even during reauthentication. On restart, retained home and away states are restored before trackers are published, including during controller outages. These states are historical until a successful poll; panel connectivity, campaign completion and deletion still require a new successful collection after startup. Historical last-success timestamps remain visible.
-
-## Campaign rules
-
-Create a named campaign with different source and target SSIDs. SSIDs are matched exactly, including case and spaces; a password change on the same SSID cannot be verified by these observations. Campaigns enroll retained source history and newly observed source MACs while active. Any observation on a different SSID after creation confirms migration, including a non-target SSID. Older non-source sightings do not establish migration evidence. A source observation at or after the latest non-source sighting marks the device returned, including simultaneous source/non-source observations; a later non-source sighting confirms it again. Offline status alone never confirms migration or clears an existing confirmation. Campaign members never age out, including when automatic client cleanup is enabled.
-
-Exclusions require a note and apply only to their campaign. Restoring an excluded device returns it to progress calculations. Migration evidence stays attached to the MAC originally observed. Target timestamps refer only to the exact target; away timestamps cover any non-source SSID. Completed campaigns freeze enrollment/evidence; their exclusions are read-only, while identity corrections can still recalculate saved results. Observation timestamps are stored in UTC and displayed in your browser's local time.
-
-Completion is manual and requires fresh collection, at least one included device and no pending/returned devices. Deleting an active or completed campaign removes its membership, exclusions and evidence atomically, preserving global labels, identities, sightings, inventory and other campaigns. The panel confirms deletion by name.
-
-**100% means the observed enrolled devices have migrated. It does not prove that unseen devices have migrated.**
-
-## Persistent data and backups
-
-The database is `<HA config>/aruba_monitor/aruba.sqlite3`, outside `custom_components` and unaffected by HACS upgrades. The integration retains SQLite schema version 1, transactions, foreign keys and WAL. Unsupported schemas are rejected without resetting data. Removing the integration entry retains its database; delete that directory manually only if you intend to discard history.
-
-HA backup hooks pause writes, drain active database work and checkpoint WAL before the backup, then resume collection afterward. Ensure your backup includes the HA configuration directory. For manual backups, stop HA or use SQLite's online backup API; copying only the main SQLite file while WAL is active is unsafe. Restore with HA stopped, including correct filesystem ownership and no leftover WAL/SHM files from another database.
-
-## Development and verification
-
-The integration uses the Python version required by HA 2026.10 (3.14.2+). Development dependencies are in `requirements-test.txt`.
-
-```sh
-python3.14 -m venv .venv-ha
-.venv-ha/bin/pip install -r requirements-test.txt
-.venv-ha/bin/python -m pytest -q
-.venv-ha/bin/ruff check custom_components tests scripts
-.venv-ha/bin/ruff format --check custom_components tests scripts
-.venv-ha/bin/python scripts/validate_package.py
-node --check custom_components/aruba_monitor/frontend/panel.js
-node --test tests/test_panel.js
-git diff --check
-```
-
-CI runs official hassfest validation. Run the local checks above before submitting changes, and test against both HA 2026.10.0 and 2026.10.2 using separate environments. Sanitized real controller fixtures are in `tests/fixtures/instant_8_10_0_16`. Synthetic tests and browser mock data do not establish live controller compatibility.
-
-The panel's administrator-only WebSocket commands are namespaced under `aruba_monitor/`: `snapshot`, `client_devices`, `client_device_link`, `client_delete`, `client_protect`, `ssid_delete`, `campaign_create`, `campaign_complete`, `campaign_delete`, `campaign_exclude`, `client_label`, `client_link`, and `client_unlink`. Panel commands have no network-configuration side effects.
-
-## Releases
-
-Merging a pull request into `main` automatically publishes a release. The workflow increments the patch version, updates `custom_components/aruba_monitor/manifest.json` and `pyproject.toml`, and commits the version change to `main`. For example, `0.2.0` becomes `0.2.1`. No manual version bump is needed for routine changes.
-
-To publish manually, open **Actions → Release → Run workflow**. Manual runs always release `main`, even if another branch is selected in the run dialog. Each new manual run increments the patch version; rerunning the same workflow run retries its original release without another bump.
-
-Each release uses its version tag as its name, such as **v0.2.1**, and the newest version is marked as GitHub’s latest release. The [latest release page](https://github.com/s-bed/ha-aruba-monitor/releases/latest) always opens the newest published version. A rolling `latest` Git tag points to the same commit. Versioned release tags let HACS detect updates and let you select an older version.
-
-Each release includes `aruba_monitor.zip`. Extract it into `<HA config>/custom_components` to install its `aruba_monitor` folder, then restart Home Assistant. HACS installs directly from the integration directory in the selected version.
-
-The workflows use GitHub's built-in token. Repository rules must allow the release workflow to push its version commit to `main`, create version tags and update `latest`. The separate hassfest workflow validates pushes and pull requests.
-
-### PR test builds
-
-The **PR preview** workflow creates a prerelease named **PR #N preview**, with a rolling `pr-N` tag and `aruba_monitor.zip`, when a pull request targeting `main` is opened or reopened. New commits replace that PR's ZIP with the current integration files. The release notes identify the exact source commit, and the packaged manifest has a distinct development version. Stable releases and `latest` remain unchanged.
-
-Merging or closing a PR automatically deletes its preview release (including its ZIP) and `pr-N` tag. Cleanup verifies that the PR is still closed and that the release and tag belong to this workflow; stable releases and other PR previews are preserved. Publication and cleanup share the same per-PR queue. Reopening a PR creates its preview again. To clean up a preview left by an already-closed PR, run **Actions → PR preview → Run workflow** with that PR number.
-
-Download the ZIP from the PR's prerelease, extract its `aruba_monitor` folder into `<HA config>/custom_components`, and restart Home Assistant. Download the ZIP again after a new commit to test the updated preview. The prerelease's source archive includes trusted main files outside the integration; use the attached integration ZIP for testing.
-
-**Actions → PR preview → Run workflow**, with an open PR number, creates or refreshes its preview; a closed PR number cleans up its preview. Only trusted workflow code runs with release permissions; PR integration files are packaged without executing their code.
+- [Settings and operations](docs/reference.md): all options, updates from older versions, device linking, cleanup, campaign rules, availability and backups.
+- [Development and releases](docs/development.md): testing, stable releases and PR previews.
