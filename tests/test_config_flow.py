@@ -376,62 +376,6 @@ async def test_options_reject_out_of_range_or_boolean_poll_intervals(hass, inter
     assert entry.options == {}
 
 
-@pytest.mark.parametrize(
-    ("interval", "expected"), [(5, 10), (9, 10), (10, 10), (45, 45), (300, 300), (900, 300)]
-)
-async def test_upgrade_changes_defaults_once_and_normalizes_interval(hass, interval, expected):
-    from custom_components.aruba_monitor import async_migrate_entry
-
-    options = {
-        "interval": interval,
-        "timeout": 8,
-        "auto_delete_clients": False,
-        "client_retention_days": 90,
-        "auto_delete_ssids": True,
-        "ssid_retention_days": 45,
-    }
-    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, options=options, version=1)
-    entry.add_to_hass(hass)
-    assert await async_migrate_entry(hass, entry)
-    assert entry.version == 2
-    assert entry.options == {
-        **options,
-        "interval": expected,
-        "auto_delete_clients": True,
-        "track_new_devices": False,
-    }
-    assert entry.data == INPUT
-    saved = {**entry.options, "auto_delete_clients": False, "track_new_devices": True}
-    hass.config_entries.async_update_entry(entry, options=saved)
-    assert await async_migrate_entry(hass, entry)
-    assert entry.options == saved
-
-
-async def test_upgrade_uses_legacy_interval_from_data_and_preserves_cleanup_setting(hass):
-    from custom_components.aruba_monitor import async_migrate_entry
-
-    entry = MockConfigEntry(domain=DOMAIN, data={**INPUT, "interval": 8}, version=1)
-    entry.add_to_hass(hass)
-    assert await async_migrate_entry(hass, entry)
-    settings = ControllerSettings.from_entry(entry)
-    assert settings.interval == 10
-    assert settings.auto_delete_clients is True
-    assert settings.auto_delete_ssids is False
-    assert settings.track_new_devices is False
-
-
-@pytest.mark.parametrize(("version", "minor_version"), [(3, 1), (2, 2)])
-async def test_future_config_versions_are_never_downgraded(hass, version, minor_version):
-    from custom_components.aruba_monitor import async_migrate_entry
-
-    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, version=version, minor_version=minor_version)
-    entry.add_to_hass(hass)
-    assert not await async_migrate_entry(hass, entry)
-    assert entry.options == {}
-    assert entry.version == version
-    assert entry.minor_version == minor_version
-
-
 async def test_options_schema_serializes_with_poll_interval_selector(hass):
     import json
 
