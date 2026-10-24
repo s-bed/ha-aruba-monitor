@@ -34,7 +34,7 @@ def ssid(value):
 
 
 def mac(value):
-    if not MAC_RE.fullmatch(value):
+    if not isinstance(value, str) or not MAC_RE.fullmatch(value):
         raise ValueError("Use a colon-separated MAC address")
     return value.lower()
 
@@ -46,12 +46,20 @@ def coordinator_for(hass):
     return entries[0].runtime_data
 
 
-def client_devices(hass, coordinator, device_id):
-    """Resolve retained client MACs against HA's cached, per-entry device records."""
+def client_macs(coordinator, device_id):
+    """Validate retained client identities before reading or changing HA records."""
     client = next((item for item in coordinator.snapshot["clients"] if item["id"] == device_id), None)
     if client is None:
         raise ValueError("Unknown client")
-    macs = {dr.format_mac(value) for value in client["macs"]}
+    macs = {mac(value) for value in client["macs"]}
+    if not macs:
+        raise ValueError("Client has no observed MAC addresses")
+    return macs
+
+
+def client_devices(hass, coordinator, device_id):
+    """Resolve retained client MACs against HA's cached, per-entry device records."""
+    macs = client_macs(coordinator, device_id)
     registry = dr.async_get(hass)
     devices = {}
     linked_devices = {}
@@ -71,7 +79,7 @@ def client_devices(hass, coordinator, device_id):
         entry = hass.config_entries.async_get_entry(device.config_entry_id)
         return {
             "id": device.id,
-            "name": device.name_by_user or device.name or (matching_macs or sorted(macs))[0],
+            "name": device.name_by_user or device.name or (matching_macs or ["Unnamed device"])[0],
             "macs": matching_macs,
             "integration": entry.domain if entry else "",
         }
@@ -79,7 +87,44 @@ def client_devices(hass, coordinator, device_id):
     return {
         "devices": [describe(device) for device in devices.values()],
         "linked_devices": [describe(device) for key, device in linked_devices.items() if key not in devices],
+        "device_options": sorted(
+            (
+                describe(device)
+                for device in registry.devices
+                if device.config_entry_id != coordinator.config_entry.entry_id
+                and hass.config_entries.async_get_entry(device.config_entry_id)
+            ),
+            key=lambda device: (device["name"].casefold(), device["id"]),
+        ),
     }
+
+
+def link_client_device(hass, coordinator, device_id, target_device_id):
+    """Attach verified client MACs to the selected native HA device without merging."""
+    if coordinator._paused or coordinator._closed:
+        raise HomeAssistantError("Aruba Monitor is temporarily unavailable during backup or unload")
+    macs = client_macs(coordinator, device_id)
+    registry = dr.async_get(hass)
+    target = registry.async_get(
+        target_device_id, include_child_devices=False, include_composite_devices=False
+    )
+    if target is None:
+        raise ValueError("Unknown Home Assistant device")
+    if target.config_entry_id == coordinator.config_entry.entry_id:
+        raise ValueError("Select a device from another integration")
+    if not hass.config_entries.async_get_entry(target.config_entry_id):
+        raise ValueError("Home Assistant device integration is unavailable")
+    connections = {(dr.CONNECTION_NETWORK_MAC, value) for value in macs}
+    if any(
+        device.id != target.id
+        for device in registry.async_get_devices(
+            connections=connections, config_entry_id=target.config_entry_id
+        )
+    ):
+        raise ValueError("Another device in that integration already uses an observed MAC address")
+    if not connections.issubset(target.connections):
+        registry.async_update_device(target.id, new_connections=set(target.connections) | connections)
+    return client_devices(hass, coordinator, device_id)
 
 
 async def dispatch(hass, command, msg):
@@ -89,6 +134,8 @@ async def dispatch(hass, command, msg):
         return await coordinator.async_snapshot()
     if command == "client_devices":
         return client_devices(hass, coordinator, msg["device_id"])
+    if command == "client_device_link":
+        return link_client_device(hass, coordinator, msg["device_id"], msg["target_device_id"])
     if command == "campaign_create":
         name = text(msg["name"], limit=100, trim=True, required=True)
         source, target = ssid(msg["source"]), ssid(msg["target"])
@@ -119,6 +166,7 @@ async def dispatch(hass, command, msg):
 COMMAND_FIELDS = {
     "snapshot": {},
     "client_devices": {"device_id": str},
+    "client_device_link": {"device_id": str, "target_device_id": str},
     "campaign_create": {"name": str, "source": str, "target": str},
     "campaign_complete": {"campaign_id": str},
     "campaign_delete": {"campaign_id": str},

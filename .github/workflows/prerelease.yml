@@ -1,0 +1,48 @@
+name: PR preview
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Open pull request number to package
+        required: true
+        type: number
+
+permissions:
+  contents: write
+  pull-requests: read
+
+# Serialize each PR, including manual runs and reruns. Stale events are skipped
+# against the live PR head, so an older run cannot replace a newer preview.
+concurrency:
+  group: aruba-monitor-preview-${{ github.event.pull_request.number || inputs.pull_request }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Never check out or execute PR code with the write token. The trusted
+      # script reads the PR integration files as Git blobs without importing them.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Package and publish current PR preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python scripts/prepare_prerelease.py \
+            --pr "$PR_NUMBER" --expected-head "$PR_HEAD" \
+            --run-id "$GITHUB_RUN_ID" --run-number "$GITHUB_RUN_NUMBER" \
+            --output "$RUNNER_TEMP/aruba_monitor.zip"

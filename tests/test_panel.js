@@ -246,19 +246,15 @@ test("snapshot rendering retains content and horizontal scroll positions", () =>
   assert.equal(table.scrollLeft, 84);
 });
 
-test("device labels, MAC linking and unlinking use the original device identity", async () => {
+test("MAC linking and unlinking use the original device identity", async () => {
   const {panel, calls} = setup();
   panel.openDevice = "device-0";
   panel.refresh = async force => calls.push(["refresh", force]);
   panel.renderDevice = (id, preserveDraft = false) => calls.push(["device", id, preserveDraft]);
-  for (const form of [
-    {id: "label-form", fields: {label: "Kitchen speaker"}},
-    {id: "alias-form", fields: {mac: "aa:bb:cc:00:00:01"}},
-  ]) await panel.onSubmit({target: {...form, querySelector: () => null}, preventDefault() {}});
+  const form = {id: "alias-form", fields: {mac: "aa:bb:cc:00:00:01"}, querySelector: () => null};
+  await panel.onSubmit({target: form, preventDefault() {}});
   await click(panel, {unlink: "aa:bb:cc:00:00:02"}).run();
   assert.deepEqual(calls, [
-    ["ws", {type: "aruba_monitor/client_label", device_id: "device-0", label: "Kitchen speaker"}],
-    ["refresh", true], ["device", "device-0", false],
     ["ws", {type: "aruba_monitor/client_link", device_id: "device-0", mac: "aa:bb:cc:00:00:01"}],
     ["refresh", true], ["device", "device-0", true],
     ["ws", {type: "aruba_monitor/client_unlink", device_id: "device-0", mac: "aa:bb:cc:00:00:02"}],
@@ -311,10 +307,11 @@ function haDevices(name = "Kitchen speaker") {
   return {
     devices: [{id: "aruba-device", name, macs: ["aa:bb:cc:00:00:00"], integration: "aruba_monitor"}],
     linked_devices: [{id: "speaker-device", name: "Speaker integration", macs: ["aa:bb:cc:00:00:00"], integration: "speaker"}],
+    device_options: [{id: "target-device", name: "Kitchen audio", macs: [], integration: "media_player"}],
   };
 }
 
-test("opening a client offers HA device and linked device navigation with escaped names", async () => {
+test("opening a client offers clickable HA device cards with escaped names and encoded URLs", async () => {
   const {panel, calls} = setup();
   panel._hass.callWS = async message => {
     calls.push(["ws", JSON.parse(JSON.stringify(message))]);
@@ -332,7 +329,13 @@ test("opening a client offers HA device and linked device navigation with escape
   assert.match(html, /Speaker integration/);
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /&lt;img/);
-  assert.equal((html.match(/Open device/g) || []).length, 2);
+  const cards = Array.from(html.matchAll(/<a class="ha-device-card"[^>]*>(.*?)<\/a>/g), match => match[1]);
+  assert.equal(cards.length, 2);
+  assert.match(cards[0], /<strong>&lt;img/);
+  assert.match(cards[1], /<strong>Speaker integration<\/strong>/);
+  assert.match(cards[1], /aa:bb:cc:00:00:00/);
+  assert.doesNotMatch(html, /Open device/);
+  assert.doesNotMatch(panel.$("#device-content").innerHTML, /Device label|label-form|device-label/);
 });
 
 test("an absent registry device and no matching links have clear empty states", async () => {
@@ -350,12 +353,10 @@ test("device lookup failure can be retried without replacing client form drafts"
   panel._hass.callWS = async () => { throw new Error("Disconnected"); };
   await click(panel, {device: "device-0"}).run();
   assert.match(panel.$("#device-ha-links").innerHTML, /Could not load/);
-  panel.$("#device-label").value = "Unsaved label";
   panel.$("#alias-mac").value = "aa:bb:cc:00:00:02";
   panel._hass.callWS = async () => haDevices();
   await click(panel, {retryDeviceLinks: "true"}).run();
-  assert.match(panel.$("#device-ha-links").innerHTML, /Open device/);
-  assert.equal(panel.$("#device-label").value, "Unsaved label");
+  assert.match(panel.$("#device-ha-links").innerHTML, /ha-device-card/);
   assert.equal(panel.$("#alias-mac").value, "aa:bb:cc:00:00:02");
 });
 
@@ -392,12 +393,14 @@ test("five-second refresh preserves client links, forms and dialog scroll", asyn
   panel._hass.callWS = async () => haDevices();
   await click(panel, {device: "device-0"}).run();
   const links = panel.$("#device-ha-links").innerHTML;
-  panel.$("#device-label").value = "Draft label";
+  panel.$("#alias-mac").value = "aa:bb:cc:00:00:02";
+  panel.$("#ha-device-target").value = "target-device";
   panel.$("#device-dialog").scrollTop = 125;
   panel._hass.callWS = async () => snapshot();
   await panel.refresh();
   assert.equal(panel.$("#device-ha-links").innerHTML, links);
-  assert.equal(panel.$("#device-label").value, "Draft label");
+  assert.equal(panel.$("#alias-mac").value, "aa:bb:cc:00:00:02");
+  assert.equal(panel.$("#ha-device-target").value, "target-device");
   assert.equal(panel.$("#device-dialog").scrollTop, 125);
 });
 
@@ -410,3 +413,126 @@ test("a synchronous HA connection error leaves a retryable device lookup", async
   assert.match(panel.$("#device-ha-links").innerHTML, /Could not load/);
   assert.match(panel.$("#device-ha-links").innerHTML, /Retry/);
 });
+
+test("the native device picker escapes option identifiers, names and integrations", async () => {
+  const {panel} = setup();
+  const result = haDevices();
+  result.device_options = [{
+    id: 'target" onclick="bad()', name: '<img src=x onerror="bad()">',
+    macs: [], integration: '<script>bad()</script>',
+  }];
+  panel._hass.callWS = async () => result;
+  await click(panel, {device: "device-0"}).run();
+  const html = panel.$("#device-ha-links").innerHTML;
+  assert.match(html, /<form id="ha-device-link-form">/);
+  assert.match(html, /name="target_device_id" required/);
+  assert.match(html, /value="target&quot; onclick=&quot;bad\(\)"/);
+  assert.match(html, /&lt;img src=x onerror=&quot;bad\(\)&quot;&gt;/);
+  assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<img|<script>|value="target" onclick=/);
+});
+
+function nativeDeviceForm(target = "target-device") {
+  const button = {disabled: false};
+  const form = {id: "ha-device-link-form", fields: {target_device_id: target}, querySelector: () => button};
+  return {button, form};
+}
+
+test("linking a selected HA device sends both identities and shows its clickable card", async () => {
+  const {panel, calls} = setup();
+  panel._hass.callWS = async () => haDevices();
+  await click(panel, {device: "device-0"}).run();
+  panel.$("#alias-mac").value = "aa:bb:cc:00:00:02";
+  panel.$("#ha-device-target").value = "target-device";
+  panel.$("#device-dialog").scrollTop = 125;
+  panel._hass.callWS = async message => {
+    calls.push(["ws", JSON.parse(JSON.stringify(message))]);
+    const result = haDevices();
+    result.linked_devices.push({id: "target-device", name: "Kitchen audio", macs: ["aa:bb:cc:00:00:00"], integration: "media_player"});
+    result.device_options = [];
+    return result;
+  };
+  const {button, form} = nativeDeviceForm();
+  await panel.onSubmit({target: form, preventDefault() {}});
+  assert.deepEqual(calls.at(-1), ["ws", {type: "aruba_monitor/client_device_link", device_id: "device-0", target_device_id: "target-device"}]);
+  assert.match(panel.$("#device-ha-links").innerHTML, /<a class="ha-device-card" href="\/config\/devices\/device\/target-device">.*<strong>Kitchen audio<\/strong>/);
+  assert.equal(panel.$("#alias-mac").value, "aa:bb:cc:00:00:02");
+  assert.equal(panel.$("#device-dialog").scrollTop, 125);
+  assert.equal(panel.$("#device-dialog").open, true);
+  assert.equal(button.disabled, false);
+});
+
+test("a failed HA device link preserves selection, alias draft, scroll and retry ability", async () => {
+  const {panel} = setup();
+  panel._hass.callWS = async () => haDevices();
+  await click(panel, {device: "device-0"}).run();
+  const links = panel.$("#device-ha-links").innerHTML;
+  panel.$("#alias-mac").value = "aa:bb:cc:00:00:02";
+  panel.$("#ha-device-target").value = "target-device";
+  panel.$("#device-dialog").scrollTop = 125;
+  panel._hass.callWS = async () => { throw new Error("Device is no longer available"); };
+  const {button, form} = nativeDeviceForm();
+  await panel.onSubmit({target: form, preventDefault() {}});
+  assert.equal(panel.$("#device-ha-links").innerHTML, links);
+  assert.equal(panel.$("#ha-device-target").value, "target-device");
+  assert.equal(panel.$("#alias-mac").value, "aa:bb:cc:00:00:02");
+  assert.equal(panel.$("#device-dialog").scrollTop, 125);
+  assert.equal(panel.$("#device-dialog").open, true);
+  assert.equal(panel.$("#device-error").textContent, "Device is no longer available");
+  assert.equal(button.disabled, false);
+});
+
+test("MAC identity changes preserve the selected native device and other alias draft", async () => {
+  const {panel} = setup();
+  panel._hass.callWS = async () => haDevices();
+  await click(panel, {device: "device-0"}).run();
+  panel.$("#alias-mac").value = "aa:bb:cc:00:00:02";
+  panel.$("#alias-mac").options = [{value: "aa:bb:cc:00:00:01"}, {value: "aa:bb:cc:00:00:02"}];
+  panel.$("#ha-device-target").value = "target-device";
+  panel.$("#ha-device-target").options = [{value: "target-device"}];
+  await panel.renderDevice("device-0", true);
+  assert.equal(panel.$("#alias-mac").value, "aa:bb:cc:00:00:02");
+  assert.equal(panel.$("#ha-device-target").value, "target-device");
+});
+
+for (const state of ["another client", "closed dialog", "disconnected panel"]) {
+  test(`a late HA device link response cannot overwrite ${state}`, async () => {
+    const {panel} = setup();
+    panel._hass.callWS = async () => haDevices();
+    await click(panel, {device: "device-0"}).run();
+    let resolve;
+    panel._hass.callWS = () => new Promise(done => { resolve = done; });
+    const {button, form} = nativeDeviceForm();
+    const request = panel.onSubmit({target: form, preventDefault() {}});
+    await Promise.resolve();
+    if (state === "another client") panel.openDevice = "device-1";
+    if (state === "closed dialog") panel.$("#device-dialog").close();
+    if (state === "disconnected panel") panel.disconnectedCallback();
+    panel.$("#device-ha-links").innerHTML = "Current client content";
+    resolve(haDevices("Wrong client"));
+    await request;
+    assert.equal(panel.$("#device-ha-links").innerHTML, "Current client content");
+    assert.equal(button.disabled, false);
+  });
+}
+
+for (const state of ["another client", "closed dialog", "disconnected panel"]) {
+  test(`a late HA device link error cannot overwrite ${state}`, async () => {
+    const {panel} = setup();
+    panel._hass.callWS = async () => haDevices();
+    await click(panel, {device: "device-0"}).run();
+    let reject;
+    panel._hass.callWS = () => new Promise((_resolve, fail) => { reject = fail; });
+    const {button, form} = nativeDeviceForm();
+    const request = panel.onSubmit({target: form, preventDefault() {}});
+    await Promise.resolve();
+    if (state === "another client") panel.openDevice = "device-1";
+    if (state === "closed dialog") panel.$("#device-dialog").close();
+    if (state === "disconnected panel") panel.disconnectedCallback();
+    panel.$("#device-error").textContent = "Current client status";
+    reject(new Error("Previous client failed"));
+    await request;
+    assert.equal(panel.$("#device-error").textContent, "Current client status");
+    assert.equal(button.disabled, false);
+  });
+}

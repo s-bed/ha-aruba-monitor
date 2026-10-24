@@ -189,37 +189,48 @@ class ArubaMonitorPanel extends HTMLElement {
   }
 
   renderDevice(id, preserveDraft = false) {
-    const draft = preserveDraft ? this.$("#device-label")?.value : undefined;
     const selectedMac = preserveDraft ? this.$("#alias-mac")?.value : undefined;
+    const selectedDevice = preserveDraft ? this.$("#ha-device-target")?.value : undefined;
     const client = this.data.clients.find(item => item.id === id);
     if (!client) { this.$("#device-dialog").close(); this.openDevice = null; return; }
     this.openDevice = id;
     const otherMacs = this.data.clients.filter(item => item.id !== id).flatMap(item => item.macs.map(mac => ({mac, name: title(item)})));
     this.$("#device-content").innerHTML = `<div class="section-heading"><div><h2>${e(title(client))}</h2><p class="muted">First seen ${e(stamp(client.first_seen))}</p></div><button class="icon-button" data-close="device-dialog" aria-label="Close">×</button></div>
-      <h3>Home Assistant devices</h3><div id="device-ha-links" aria-live="polite"><p class="muted">Loading devices…</p></div>
-      <form id="label-form"><label for="device-label">Device label</label><div class="form-row"><input id="device-label" name="label" maxlength="100" value="${e(client.label)}" placeholder="Give this device a recognizable name"><button>Save</button></div></form>
+      <div class="device-detail-grid">
+      <section class="device-column"><h3>Home Assistant devices</h3><div id="device-ha-links" aria-live="polite"><p class="muted">Loading devices…</p></div></section>
+      <section class="device-column device-identities">
       <h3>MAC identities</h3><p class="muted">Link only MACs you have verified belong to this device. Migration evidence is recalculated; observations are preserved.</p>
       ${client.macs.map(mac => `<div class="alias-row"><span class="mono">${e(mac)}</span>${client.macs.length > 1 ? `<button class="secondary" data-unlink="${e(mac)}">Unlink</button>` : ""}</div>`).join("")}
       ${otherMacs.length ? `<form id="alias-form"><label for="alias-mac">Link an observed MAC from another device</label><div class="form-row"><select id="alias-mac" name="mac">${otherMacs.map(item => `<option value="${e(item.mac)}">${e(item.name)} · ${e(item.mac)}</option>`).join("")}</select><button>Link MAC</button></div></form>` : '<p class="muted">Other observed MAC addresses will be available to link here.</p>'}
-      <h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div><p id="device-error" class="error" role="alert"></p>`;
-    if (draft !== undefined) this.$("#device-label").value = draft;
+      </section><section class="device-history"><h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div></section></div><p id="device-error" class="error" role="alert"></p>`;
     const select = this.$("#alias-mac");
     if (select && Array.from(select.options).some(option => option.value === selectedMac)) select.value = selectedMac;
-    return this.loadDeviceLinks(id);
+    return this.loadDeviceLinks(id, selectedDevice);
   }
 
-  async loadDeviceLinks(id) {
+  renderDeviceLinks(result, selectedDevice) {
+    const dialog = this.$("#device-dialog");
+    const scroll = dialog.scrollTop;
+    const rows = devices => devices.map(device => `<a class="ha-device-card" href="/config/devices/device/${e(encodeURIComponent(device.id))}"><svg class="device-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span class="ha-device-details"><strong>${e(device.name)}</strong><small>${e(device.integration === "aruba_monitor" ? "Aruba Monitor" : device.integration.replaceAll("_", " "))}</small><small class="mono">${device.macs.map(e).join(", ")}</small></span><span class="device-chevron" aria-hidden="true">›</span></a>`).join("");
+    const options = result.device_options || [];
+    this.$("#device-ha-links").innerHTML =
+      (result.devices.length ? rows(result.devices) : '<p class="muted">This client’s Home Assistant device is not registered yet.</p>') +
+      '<h3>Linked devices</h3>' +
+      (result.linked_devices.length ? rows(result.linked_devices) : '<p class="muted">No linked Home Assistant devices found.</p>') +
+      (options.length ? `<form id="ha-device-link-form"><label for="ha-device-target">Link a Home Assistant device</label><div class="form-row"><select id="ha-device-target" name="target_device_id" required><option value="" disabled selected>Choose a device…</option>${options.map(device => `<option value="${e(device.id)}">${e(device.name)} · ${e(device.integration.replaceAll("_", " "))}</option>`).join("")}</select><button>Link device</button></div><p class="caption">Adds this client’s MAC addresses to the selected device in Home Assistant. Choose only a device you recognize as the same hardware.</p></form>` : '<p class="caption">Other Home Assistant devices will appear here when available to link.</p>');
+    const select = this.$("#ha-device-target");
+    if (select && Array.from(select.options).some(option => option.value === selectedDevice)) select.value = selectedDevice;
+    dialog.scrollTop = scroll;
+  }
+
+  async loadDeviceLinks(id, selectedDevice) {
     const request = ++this.deviceRequest;
     const generation = this.generation;
     const current = () => this.mounted && this.generation === generation && this.deviceRequest === request && this.openDevice === id && this.$("#device-dialog").open;
     try {
       const result = await Promise.resolve().then(() => this.command("client_devices", {device_id: id}));
       if (!current()) return;
-      const rows = devices => devices.map(device => `<div class="ha-device-row"><div><strong>${e(device.name)}</strong><small class="muted">${e(device.integration)} · ${device.macs.map(e).join(", ")}</small></div><a class="ha-device-link" href="/config/devices/device/${e(encodeURIComponent(device.id))}">Open device</a></div>`).join("");
-      this.$("#device-ha-links").innerHTML =
-        (result.devices.length ? rows(result.devices) : '<p class="muted">This client’s Home Assistant device is not registered yet.</p>') +
-        '<h3>Linked devices</h3>' +
-        (result.linked_devices.length ? '<p class="muted">Matched by MAC address.</p>' + rows(result.linked_devices) : '<p class="muted">No linked Home Assistant devices found.</p>');
+      this.renderDeviceLinks(result, selectedDevice);
     } catch (_error) {
       if (current()) this.$("#device-ha-links").innerHTML = '<p class="error">Could not load Home Assistant devices.</p><button class="secondary" data-retry-device-links="true">Retry</button>';
     }
@@ -363,6 +374,9 @@ class ArubaMonitorPanel extends HTMLElement {
     event.preventDefault();
     const form = event.target;
     const values = Object.fromEntries(new FormData(form));
+    const deviceId = this.openDevice;
+    const generation = this.generation;
+    let deviceRequest;
     const submit = form.querySelector('button[type="submit"], button:not([type])');
     if (submit) submit.disabled = true;
     try {
@@ -371,16 +385,20 @@ class ArubaMonitorPanel extends HTMLElement {
         this.$("#campaign-dialog").close();
         form.reset();
         await this.refresh(true);
-      } else if (form.id === "label-form") {
-        await this.command("client_label", {device_id: this.openDevice, ...values});
-        await this.refresh(true);
-        this.renderDevice(this.openDevice);
+      } else if (form.id === "ha-device-link-form") {
+        this.$("#device-error").textContent = "";
+        deviceRequest = ++this.deviceRequest;
+        const result = await this.command("client_device_link", {device_id: deviceId, ...values});
+        if (this.mounted && generation === this.generation && deviceRequest === this.deviceRequest && this.openDevice === deviceId && this.$("#device-dialog").open) {
+          this.renderDeviceLinks(result, values.target_device_id);
+        }
       } else if (form.id === "alias-form") {
         await this.command("client_link", {device_id: this.openDevice, ...values});
         await this.refresh(true);
         this.renderDevice(this.openDevice, true);
       }
     } catch (error) {
+      if (form.id === "ha-device-link-form" && (!this.mounted || generation !== this.generation || deviceRequest !== this.deviceRequest || this.openDevice !== deviceId || !this.$("#device-dialog").open)) return;
       this.$(form.id === "campaign-form" ? "#campaign-error" : "#device-error").textContent = error.message || "Request failed";
     } finally { if (submit) submit.disabled = false; }
   }

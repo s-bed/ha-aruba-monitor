@@ -76,7 +76,12 @@ without a concrete need. Store UTC timestamps and display browser-local times.
 
 Keep Clients first and selected by default, Network second, and Migrations last.
 Client details must link to native HA devices and list devices sharing exact
-MAC connections, without controller polling or changing registry records.
+MAC connections without controller polling. The explicit administrator device
+picker may add retained client MACs to a selected foreign device’s network
+connections, preserving all other metadata and ownership. Reject same-entry MAC
+collisions before any registry write; never merge records. Keep this write
+blocked during backup/unload. Device cards are fully clickable, the desktop popup
+uses two columns with a mobile fallback, and no label input is shown.
 Preserve HA theme styling, fixed header/footer with interior scrolling, local
 assets, and no frontend build pipeline. Campaign client lists start collapsed and expand independently. Keep
 campaign actions and counts visible when collapsed. Default to **Pending &
@@ -131,11 +136,18 @@ node --test tests/test_panel.js
 git diff --check
 ```
 
-CI keeps official hassfest validation and the release workflow. Merged pull
+CI keeps official hassfest validation, stable releases, and PR preview releases. Merged pull
 requests and new manual workflow runs automatically bump the patch version and
 publish releases. Reruns must reuse the original release and preserve newer
 `latest` tags. Manual runs always release trusted `main`; see
 `README.md` for the release contract.
+
+PR preview publishing must execute only trusted main code, packaging PR files as
+Git blobs. Keep preview tags/releases separate from stable versions and `latest`.
+Only publish the current head of an open PR targeting main; older runs must not
+roll back newer previews. Package only integration runtime files, rejecting links,
+submodules, secrets and data files. Preview manifest versions must identify the
+source build. Never execute PR code with the publishing token.
 
 Add meaningful regression coverage for changed parsing, band resolution,
 campaign evidence, identity operations, deletion, availability, or storage
