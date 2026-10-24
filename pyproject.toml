@@ -1,6 +1,6 @@
 [project]
 name = "aruba-monitor-integration-dev"
-version = "0.2.2"
+version = "0.2.3"
 description = "Development tools for the Aruba Monitor Home Assistant integration"
 requires-python = ">=3.14.2"
 
