@@ -60,9 +60,9 @@ before publishing trackers on restart, while keeping panel/completion freshness 
 Ordinary client absence means available not_home. Poll every 30 seconds by default,
 with a configurable interval of 10–300 seconds. Client cleanup defaults on at 30 days;
 SSID cleanup defaults off. Enabled trackers, explicit client protection and campaign
-references prevent automatic client deletion. The config-entry version 2 upgrade
-enables client cleanup and disables new-device tracking once, preserves retention
-periods/SSID options, and clamps formerly valid intervals to the new range.
+references prevent automatic client deletion. Config entries use version 2;
+do not add version-upgrade migrations or automatic legacy-entity conversions.
+Saved options and entity enable/disable choices remain under user control.
 Native statistics retain values until stale after three polling intervals; AP
 metrics additionally require AP availability; client statistics require that MAC
 in the last successful collection. Client last-seen timestamps remain available

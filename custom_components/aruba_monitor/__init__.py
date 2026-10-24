@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
-import re
 from functools import partial
 from pathlib import Path
 
@@ -15,7 +13,6 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import entity_registry as er
 
 from .config import ControllerSettings
 from .const import (
@@ -45,46 +42,6 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
-async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Upgrade cleanup/tracking defaults once without resetting later user choices."""
-    if entry.version > 2 or (entry.version == 2 and entry.minor_version > 1):
-        return False
-    if entry.version == 2:
-        return True
-    if entry.version != 1:
-        return False
-    options = dict(entry.options)
-    interval = options.get("interval", entry.data.get("interval", 30))
-    if (
-        isinstance(interval, bool)
-        or not isinstance(interval, (int, float))
-        or not math.isfinite(interval)
-        or interval < 5
-    ):
-        _LOGGER.error("Cannot upgrade Aruba Monitor: invalid saved polling interval")
-        return False
-    options.update(
-        interval=min(300, max(10, interval)),
-        auto_delete_clients=True,
-        track_new_devices=False,
-    )
-    hass.config_entries.async_update_entry(entry, options=options, version=2, minor_version=1)
-    return True
-
-
-def _remove_legacy_client_connectivity(hass: HomeAssistant, entry: ConfigEntry, site: str) -> None:
-    """Remove only replaced connectivity entities belonging to this integration entry."""
-    registry = er.async_get(hass)
-    legacy_id = re.compile(rf"aruba_{re.escape(site)}_client_[0-9a-f]{{24}}_online")
-    for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
-        if (
-            entity.platform == DOMAIN
-            and entity.domain == Platform.BINARY_SENSOR
-            and legacy_id.fullmatch(entity.unique_id)
-        ):
-            registry.async_remove(entity.entity_id)
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     settings = ControllerSettings.from_entry(entry)
     try:
@@ -106,7 +63,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     platforms_loaded = False
     try:
         await coordinator.async_initialize()
-        _remove_legacy_client_connectivity(hass, entry, settings.site_id)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         platforms_loaded = True
         await panel_custom.async_register_panel(

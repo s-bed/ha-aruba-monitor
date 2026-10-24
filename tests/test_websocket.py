@@ -41,6 +41,7 @@ async def monitor(hass, tmp_path):
     with patch.object(ArubaClient, "request", new_callable=AsyncMock, side_effect=request):
         entry = MockConfigEntry(
             domain=DOMAIN,
+            version=2,
             unique_id="home",
             data={
                 "site_id": "home",

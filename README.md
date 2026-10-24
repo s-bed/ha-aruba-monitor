@@ -22,13 +22,39 @@ Copy `custom_components/aruba_monitor` to `<HA config>/custom_components/aruba_m
 
 ## Configure
 
-Enter the controller hostname/IP (without a URL scheme or port), username, password and site ID. Keep the site ID stable because it determines entity identities. The default is `home`, and it cannot be changed through reconfiguration.
+Home Assistant must be able to reach the controller's HTTPS port and authenticate to its local REST API. Setup reads `show version` and validates `show clients`, `show aps` and `show network` through `/rest/show-cmd` before accepting the entry. Use controller credentials that can run these commands. Configuration is through the Home Assistant UI; no YAML configuration is required.
 
-Connection settings include port (default `4343`), an optional explicit Instant AP IPv4 address, TLS verification (enabled by default), and an optional CA certificate file accessible inside Home Assistant. Custom CA paths refer to the HA host/container filesystem, not the computer running your browser. The default HTTPS timeout is 15 seconds.
+The initial setup form contains:
 
-Setup validates the login and all required controller tables before accepting the entry. Use **Reconfigure** for connection/TLS/credential changes and **Options** for **Track new devices**, the collection interval (default 30 seconds, range 10–300), timeout, and automatic cleanup. Track new devices is off by default; it controls whether newly registered presence trackers are enabled and does not change existing entity choices. Client cleanup is enabled by default; SSID cleanup is off by default. Each has a separate inactivity period, defaulting to 30 days, specified in positive whole numbers of days. Upgrading to the presence-tracker release enables client cleanup and turns new-device tracking off once, preserving retention periods and the SSID cleanup setting. Later changes to these options are respected. Previously valid polling intervals outside the new range are clamped to its nearest boundary. Invalid credentials during operation start Home Assistant's reauthentication flow.
+| Setting | Default | Guidance |
+| --- | --- | --- |
+| Site ID | `home` | Use 1–64 letters, digits, hyphens or underscores. Keep it stable: it determines entity identities and cannot be changed through reconfiguration. |
+| Virtual controller hostname or IP | Required | Enter only the hostname or IP, without a URL scheme, path or port. |
+| HTTPS port | `4343` | Set the port separately from the controller address. |
+| Instant AP IP address | Automatic | Optional explicit IP for show commands. Otherwise the integration resolves an IPv4 address from the controller hostname. |
+| Username and password | Required | Credentials for the local controller. |
+| Verify TLS certificate | Enabled | Validates the controller certificate. |
+| CA certificate file path | Empty | Optional CA file accessible inside Home Assistant. Paths refer to the HA host/container filesystem, not your browser's computer. |
 
-Do not run two collectors against the same controller during normal use. Monitoring pauses when Home Assistant is stopped or restarted.
+In **Settings → Devices & services**, open Aruba Monitor's entry menu and use **Reconfigure** to change the connection, TLS settings or credentials. Leave the password blank to keep the saved password. Invalid credentials during operation start Home Assistant's reauthentication flow.
+
+Use **Options** to change:
+
+| Option | Default | Allowed values or behavior |
+| --- | --- | --- |
+| Track new devices | Off | Enables presence trackers when first registered. Existing entity enable/disable choices are preserved. |
+| Polling interval | 30 seconds | 10–300 seconds. |
+| HTTP request timeout | 15 seconds | Any positive number of seconds, applied to each request. |
+| Automatically delete inactive clients | On | Deletes eligible absent clients after successful collections. Campaign references, explicit protection and enabled trackers prevent automatic deletion. |
+| Client inactivity period | 30 days | Positive whole number of days. |
+| Automatically delete inactive SSIDs | Off | Deletes eligible SSIDs no longer reported or used by observed clients. |
+| SSID inactivity period | 30 days | Positive whole number of days, independent of client retention. |
+
+Polling continues with all entities disabled and the panel closed. Monitoring pauses when Home Assistant is stopped or restarted. Do not run two collectors against the same controller during normal use.
+
+### Updating an existing installation
+
+Current configuration entries use version 2 and keep their saved settings when updated. Older configuration-entry versions are not converted automatically: remove the integration entry in **Settings → Devices & services**, then add it again with the same site ID. Removing the entry preserves the retained database and campaign history. Obsolete entities from earlier releases are not removed automatically; remove them manually if needed.
 
 ## Devices, entities and panel
 
@@ -51,19 +77,19 @@ Client devices advertise their network MAC to Home Assistant, which automaticall
 
 Client entities retain stable IDs when names, SSIDs or campaign identity links change. They remain registered when clients disconnect. Retained identity groups affect campaign grouping, not individual MAC entities or network connection counts. AP IDs use serial hashes; SSID IDs hash the exact UTF-8 SSID. AP renames preserve entity identities. Missing metrics remain unknown. Client signal is SNR in dB.
 
+Bands use controller-reported values first. Missing client bands can be resolved from a matching AP and primary radio channel, including bonded-channel suffixes. Model-based channel inference is limited to the documented dual-band AP-324/325, AP-334/335 and AP-534/535 families. Other hardware requires a reported band or an unambiguous match to a radio with a reported band. Unresolved matches remain unknown; channel numbers or radio indexes alone never imply 6 GHz support.
+
 An administrator can manually delete an inactive client or SSID after a fresh successful collection confirms its absence. The panel asks for confirmation because deletion is permanent. Deleting a client removes its retained MAC history and Aruba Monitor entities and device association; Home Assistant records owned by other integrations, including their network connections, remain unchanged. Manual deletion also removes the client’s membership, exclusions and evidence from every active or completed migration campaign in the same transaction and recalculates campaign progress. Other clients and the campaigns themselves remain saved. Automatic cleanup still skips clients referenced by any saved campaign. Enabled presence trackers also protect the entire retained identity from automatic cleanup while away; disabling a tracker removes that exemption. Manual deletion of an eligible inactive client is still allowed. Use **Protect from automatic cleanup** in a client's details to retain that client regardless of its inactivity period; protection does not block an explicit manual deletion. Protection is saved per MAC in the existing database metadata without changing the database schema. If a deleted client or SSID is detected again, the integration recreates it as a newly observed item.
 
 Automatic cleanup runs only after a successful collection and deletes absent clients or SSIDs whose last observation is at least their configured inactivity period ago. Controller outages, failed collections and integration startup without a new successful collection never trigger deletion. Protect clients whose historical records you want to retain beyond the inactivity period.
 
 A failed poll immediately marks collection unhealthy and panel connectivity unknown, and prevents campaign completion or deletion. Presence trackers keep their last home/away state through the first two failed complete collection attempts, after internal authentication/table retries. Three consecutive failures make trackers unavailable until a successful collection; the outage and recovery are each logged once. Rejected credentials make trackers unavailable immediately and start reauthentication. A client that simply leaves remains available as `not_home`. Native statistics retain their last values until collection is stale after three polling intervals; AP statistics additionally require the AP to be online; client statistics require that MAC to be connected in the last successful collection. Client last-seen timestamps remain available as historical values. A separate timer enforces staleness even during reauthentication. On restart, retained home and away states are restored before trackers are published, including during controller outages. These states are historical until a successful poll; panel connectivity, campaign completion and deletion still require a new successful collection after startup. Historical last-success timestamps remain visible.
 
-The presence-tracker upgrade removes the old client **Wi-Fi connected** binary sensors, including disabled entries, while preserving client devices and diagnostic sensors. Update automations that reference those binary sensors to use the new trackers and their `home` / `not_home` states. All trackers start disabled on upgrade; subsequent enable/disable choices survive reloads and restarts.
-
 ## Campaign rules
 
-Campaigns enroll retained source history and newly observed source MACs while active. Any observation on a different SSID after creation confirms migration, including a non-target SSID. A source observation at or after the latest non-source sighting marks the device returned. Offline status alone never confirms migration. Campaign members never age out, including when automatic client cleanup is enabled.
+Create a named campaign with different source and target SSIDs. SSIDs are matched exactly, including case and spaces; a password change on the same SSID cannot be verified by these observations. Campaigns enroll retained source history and newly observed source MACs while active. Any observation on a different SSID after creation confirms migration, including a non-target SSID. Older non-source sightings do not establish migration evidence. A source observation at or after the latest non-source sighting marks the device returned, including simultaneous source/non-source observations; a later non-source sighting confirms it again. Offline status alone never confirms migration or clears an existing confirmation. Campaign members never age out, including when automatic client cleanup is enabled.
 
-Exclusions require a note and apply only to their campaign. Migration evidence stays attached to the MAC originally observed. Completed campaigns freeze enrollment/evidence; their exclusions are read-only, while identity corrections can still recalculate saved results.
+Exclusions require a note and apply only to their campaign. Restoring an excluded device returns it to progress calculations. Migration evidence stays attached to the MAC originally observed. Target timestamps refer only to the exact target; away timestamps cover any non-source SSID. Completed campaigns freeze enrollment/evidence; their exclusions are read-only, while identity corrections can still recalculate saved results. Observation timestamps are stored in UTC and displayed in your browser's local time.
 
 Completion is manual and requires fresh collection, at least one included device and no pending/returned devices. Deleting an active or completed campaign removes its membership, exclusions and evidence atomically, preserving global labels, identities, sightings, inventory and other campaigns. The panel confirms deletion by name.
 
@@ -88,6 +114,7 @@ python3.14 -m venv .venv-ha
 .venv-ha/bin/python scripts/validate_package.py
 node --check custom_components/aruba_monitor/frontend/panel.js
 node --test tests/test_panel.js
+git diff --check
 ```
 
 CI runs official hassfest validation. Run the local checks above before submitting changes, and test against both HA 2026.10.0 and 2026.10.2 using separate environments. Sanitized real controller fixtures are in `tests/fixtures/instant_8_10_0_16`. Synthetic tests and browser mock data do not establish live controller compatibility.
@@ -110,8 +137,8 @@ The workflows use GitHub's built-in token. Repository rules must allow the relea
 
 The **PR preview** workflow creates a prerelease named **PR #N preview**, with a rolling `pr-N` tag and `aruba_monitor.zip`, when a pull request targeting `main` is opened or reopened. New commits replace that PR's ZIP with the current integration files. The release notes identify the exact source commit, and the packaged manifest has a distinct development version. Stable releases and `latest` remain unchanged.
 
-Merging or closing a PR automatically deletes its preview release (including its ZIP) and `pr-N` tag. Cleanup verifies that the PR is still closed and that the release and tag belong to this workflow; stable releases and other PR previews are preserved. Publication and cleanup share the same per-PR queue. Reopening a PR creates its preview again. To clean up a preview left by an already-closed PR, run **Actions → PR preview → Run workflow** with that PR number after this workflow change is merged.
+Merging or closing a PR automatically deletes its preview release (including its ZIP) and `pr-N` tag. Cleanup verifies that the PR is still closed and that the release and tag belong to this workflow; stable releases and other PR previews are preserved. Publication and cleanup share the same per-PR queue. Reopening a PR creates its preview again. To clean up a preview left by an already-closed PR, run **Actions → PR preview → Run workflow** with that PR number.
 
 Download the ZIP from the PR's prerelease, extract its `aruba_monitor` folder into `<HA config>/custom_components`, and restart Home Assistant. Download the ZIP again after a new commit to test the updated preview. The prerelease's source archive includes trusted main files outside the integration; use the attached integration ZIP for testing.
 
-The workflow must first be merged into `main` before GitHub activates it. After that, **Actions → PR preview → Run workflow**, with an open PR number, can create or refresh a preview for a PR that was already open; a closed PR number cleans up its preview. Only trusted workflow code runs with release permissions; PR integration files are packaged without executing their code.
+**Actions → PR preview → Run workflow**, with an open PR number, creates or refreshes its preview; a closed PR number cleans up its preview. Only trusted workflow code runs with release permissions; PR integration files are packaged without executing their code.
