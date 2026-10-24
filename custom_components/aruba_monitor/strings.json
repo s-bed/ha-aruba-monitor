@@ -54,20 +54,21 @@
   "options": {
     "step": {
       "init": {
-        "title": "Collection and automatic cleanup",
+        "title": "Presence, collection and automatic cleanup",
         "data": {
-          "interval": "Polling interval (seconds, minimum 5)",
+          "interval": "Polling interval (seconds, 10–300)",
           "timeout": "HTTP request timeout (seconds)",
           "auto_delete_clients": "Automatically delete inactive clients",
           "client_retention_days": "Client inactivity period (days)",
           "auto_delete_ssids": "Automatically delete inactive SSIDs",
-          "ssid_retention_days": "SSID inactivity period (days)"
+          "ssid_retention_days": "SSID inactivity period (days)",
+          "track_new_devices": "Track new devices"
         },
-        "description": "Cleanup is optional and runs after successful collections. Campaign members and protected clients are retained. Deleting an inactive item removes local inventory; deleting a client also removes its retained MAC history."
+        "description": "Track new devices controls whether newly registered presence trackers are enabled; existing entity choices stay unchanged. Client cleanup is enabled by default and runs after successful collections. Campaign members, protected clients and clients with enabled trackers are retained. Deleting an inactive client also removes its retained MAC history."
       }
     },
     "error": {
-      "invalid_config": "Use a polling interval of at least five seconds, a positive HTTP timeout, and positive whole numbers of days for inactivity periods."
+      "invalid_config": "Use a polling interval between 10 and 300 seconds, a positive HTTP timeout, and positive whole numbers of days for inactivity periods."
     }
   }
 }

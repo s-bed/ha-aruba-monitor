@@ -28,7 +28,8 @@ INPUT = {
 DEFAULT_OPTIONS = {
     "interval": 30.0,
     "timeout": 15.0,
-    "auto_delete_clients": False,
+    "auto_delete_clients": True,
+    "track_new_devices": False,
     "client_retention_days": 30,
     "auto_delete_ssids": False,
     "ssid_retention_days": 30,
@@ -188,7 +189,7 @@ async def test_options_change_timing_without_changing_identity(hass):
     assert settings.interval == 60
     assert settings.timeout == 7.5
     assert settings.site_id == "home"
-    assert settings.auto_delete_clients is False
+    assert settings.auto_delete_clients is True
     assert settings.auto_delete_ssids is False
     assert settings.client_retention_days == 30
     assert settings.ssid_retention_days == 30
@@ -259,7 +260,7 @@ async def test_options_reject_boolean_cleanup_days_without_saving(hass, option):
     assert entry.options == {}
 
 
-@pytest.mark.parametrize("option", ["auto_delete_clients", "auto_delete_ssids"])
+@pytest.mark.parametrize("option", ["auto_delete_clients", "auto_delete_ssids", "track_new_devices"])
 @pytest.mark.parametrize("value", [0, 1, "true", None])
 async def test_options_reject_non_boolean_cleanup_switches(hass, option, value):
     entry = MockConfigEntry(domain=DOMAIN, data=INPUT)
@@ -276,10 +277,10 @@ async def test_options_reject_nan_without_saving(hass):
     entry = MockConfigEntry(domain=DOMAIN, data=INPUT, unique_id="home")
     entry.add_to_hass(hass)
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    with pytest.raises(InvalidData):
-        await hass.config_entries.options.async_configure(
-            result["flow_id"], user_input={"interval": float("nan"), "timeout": 5}
-        )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"interval": float("nan"), "timeout": 5}
+    )
+    assert result["errors"] == {"base": "invalid_config"}
     assert entry.options == {}
 
 
@@ -322,9 +323,9 @@ def test_options_cannot_override_site_or_connection_settings():
 
 
 @pytest.mark.parametrize("options", [{}, {"interval": 45, "timeout": 10}])
-def test_existing_entries_keep_automatic_cleanup_disabled(options):
+def test_settings_default_to_client_cleanup_and_disabled_tracking(options):
     settings = ControllerSettings.from_entry(MockConfigEntry(domain=DOMAIN, data=INPUT, options=options))
-    assert settings.auto_delete_clients is False
+    assert settings.auto_delete_clients is True
     assert settings.auto_delete_ssids is False
     assert settings.client_retention_days == 30
     assert settings.ssid_retention_days == 30
@@ -337,8 +338,110 @@ def test_settings_require_positive_integer_cleanup_days(option, value):
         ControllerSettings(**{**INPUT, option: value})
 
 
-@pytest.mark.parametrize("option", ["auto_delete_clients", "auto_delete_ssids"])
+@pytest.mark.parametrize("option", ["auto_delete_clients", "auto_delete_ssids", "track_new_devices"])
 @pytest.mark.parametrize("value", [0, 1, "true", None])
 def test_settings_require_boolean_cleanup_switches(option, value):
     with pytest.raises(ValueError, match="true or false"):
         ControllerSettings(**{**INPUT, option: value})
+
+
+@pytest.mark.parametrize("interval", [10, 30, 300])
+async def test_poll_interval_boundaries_are_accepted(hass, interval):
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, version=2)
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    with patch.object(hass.config_entries, "async_schedule_reload"):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={**DEFAULT_OPTIONS, "interval": interval}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert ControllerSettings.from_entry(entry).interval == interval
+
+
+@pytest.mark.parametrize("interval", [True, False, 9, 301, float("inf"), float("nan")])
+def test_settings_reject_invalid_poll_intervals(interval):
+    with pytest.raises(ValueError, match="between 10 and 300"):
+        ControllerSettings(**{**INPUT, "interval": interval})
+
+
+@pytest.mark.parametrize("interval", [True, False, 9, 301, float("inf")])
+async def test_options_reject_out_of_range_or_boolean_poll_intervals(hass, interval):
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, version=2)
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={**DEFAULT_OPTIONS, "interval": interval}
+        )
+    assert entry.options == {}
+
+
+@pytest.mark.parametrize(
+    ("interval", "expected"), [(5, 10), (9, 10), (10, 10), (45, 45), (300, 300), (900, 300)]
+)
+async def test_upgrade_changes_defaults_once_and_normalizes_interval(hass, interval, expected):
+    from custom_components.aruba_monitor import async_migrate_entry
+
+    options = {
+        "interval": interval,
+        "timeout": 8,
+        "auto_delete_clients": False,
+        "client_retention_days": 90,
+        "auto_delete_ssids": True,
+        "ssid_retention_days": 45,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, options=options, version=1)
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.version == 2
+    assert entry.options == {
+        **options,
+        "interval": expected,
+        "auto_delete_clients": True,
+        "track_new_devices": False,
+    }
+    assert entry.data == INPUT
+    saved = {**entry.options, "auto_delete_clients": False, "track_new_devices": True}
+    hass.config_entries.async_update_entry(entry, options=saved)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options == saved
+
+
+async def test_upgrade_uses_legacy_interval_from_data_and_preserves_cleanup_setting(hass):
+    from custom_components.aruba_monitor import async_migrate_entry
+
+    entry = MockConfigEntry(domain=DOMAIN, data={**INPUT, "interval": 8}, version=1)
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    settings = ControllerSettings.from_entry(entry)
+    assert settings.interval == 10
+    assert settings.auto_delete_clients is True
+    assert settings.auto_delete_ssids is False
+    assert settings.track_new_devices is False
+
+
+@pytest.mark.parametrize(("version", "minor_version"), [(3, 1), (2, 2)])
+async def test_future_config_versions_are_never_downgraded(hass, version, minor_version):
+    from custom_components.aruba_monitor import async_migrate_entry
+
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, version=version, minor_version=minor_version)
+    entry.add_to_hass(hass)
+    assert not await async_migrate_entry(hass, entry)
+    assert entry.options == {}
+    assert entry.version == version
+    assert entry.minor_version == minor_version
+
+
+async def test_options_schema_serializes_with_poll_interval_selector(hass):
+    import json
+
+    import probatio
+    from homeassistant.helpers import config_validation as cv
+
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, version=2)
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    fields = probatio.to_field_list(result["data_schema"], custom_serializer=cv.custom_serializer)
+    json.dumps(fields)
+    interval = next(field for field in fields if field["name"] == "interval")
+    assert interval["selector"]["number"] == {"min": 10, "max": 300, "step": 1, "mode": "box"}

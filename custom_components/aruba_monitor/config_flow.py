@@ -17,7 +17,8 @@ from .parser import ParseError
 _OPTION_DEFAULTS = {
     "interval": 30.0,
     "timeout": 15.0,
-    "auto_delete_clients": False,
+    "auto_delete_clients": True,
+    "track_new_devices": False,
     "client_retention_days": 30,
     "auto_delete_ssids": False,
     "ssid_retention_days": 30,
@@ -79,7 +80,7 @@ async def _connection_errors(hass, data: dict[str, Any]) -> dict[str, str]:
 class ArubaMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Set up exactly one monitor; the site ID remains stable for its lifetime."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback
@@ -167,12 +168,15 @@ class ArubaMonitorOptionsFlow(config_entries.OptionsFlowWithReload):
             step_id="init",
             data_schema=probatio.Schema(
                 {
-                    probatio.Required("interval", default=defaults["interval"]): probatio.All(
-                        probatio.Coerce(float), probatio.Range(min=5)
+                    probatio.Required("interval", default=defaults["interval"]): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=10, max=300, step=1, mode=selector.NumberSelectorMode.BOX
+                        )
                     ),
                     probatio.Required("timeout", default=defaults["timeout"]): probatio.All(
                         probatio.Coerce(float), probatio.Range(min=0, min_included=False)
                     ),
+                    probatio.Required("track_new_devices", default=defaults["track_new_devices"]): bool,
                     probatio.Required("auto_delete_clients", default=defaults["auto_delete_clients"]): bool,
                     probatio.Required(
                         "client_retention_days", default=defaults["client_retention_days"]

@@ -104,19 +104,19 @@ def test_client_metrics_keep_per_mac_identity_and_evidence_through_panel_linking
     assert before.keys() == linked.keys()
     for mac, connected in ((first, False), (second, True)):
         key = f"client_{ssid_id(mac)}"
-        assert linked[f"{key}_online"].value is connected
-        assert linked[f"{key}_online"].available
-        assert linked[f"{key}_online"].device["connections"] == {("mac", mac)}
-        assert linked[f"{key}_online"].device["identifiers"] == {(DOMAIN, f"aruba_home_{key}")}
-        assert linked[f"{key}_online"].device["name"] == "Living room device"
+        assert linked[f"{key}_tracker"].value is connected
+        assert linked[f"{key}_tracker"].available
+        assert linked[f"{key}_tracker"].device["connections"] == {("mac", mac)}
+        assert linked[f"{key}_tracker"].device["identifiers"] == {(DOMAIN, f"aruba_home_{key}")}
+        assert linked[f"{key}_tracker"].device["name"] == "Living room device"
         assert linked[f"{key}_ssid"].value == ("New Wi-Fi" if connected else "Old Wi-Fi")
         assert linked[f"{key}_ssid"].available is connected
         assert linked[f"{key}_last_seen"].available
-        assert linked[f"{key}_online"].enabled_by_default
+        assert not linked[f"{key}_tracker"].enabled_by_default
         assert all(
             not metric.enabled_by_default
             for name, metric in linked.items()
-            if name.startswith(f"{key}_") and name != f"{key}_online"
+            if name.startswith(f"{key}_") and name != f"{key}_tracker"
         )
     store.unlink(identity["id"], second)
     assert build_metrics(store.snapshot(), "home").keys() == before.keys()
@@ -128,8 +128,8 @@ def test_client_unknown_metrics_units_and_failure_availability(store):
     snapshot = store.snapshot()
     metrics = build_metrics(snapshot, "home")
     key = f"client_{ssid_id(mac)}"
-    assert metrics[f"{key}_online"].device["name"] == f"Wi-Fi client {mac}"
-    assert "manufacturer" not in metrics[f"{key}_online"].device
+    assert metrics[f"{key}_tracker"].device["name"] == f"Wi-Fi client {mac}"
+    assert "manufacturer" not in metrics[f"{key}_tracker"].device
     for field in ("signal_db", "speed_mbps", "band", "channel"):
         assert metrics[f"{key}_{field}"].value is None
     assert metrics[f"{key}_signal_db"].unit == "dB"
@@ -138,8 +138,10 @@ def test_client_unknown_metrics_units_and_failure_availability(store):
     assert metrics[f"{key}_speed_mbps"].device_class == "data_rate"
     snapshot["status"].update(fresh=False, last_error="Controller unavailable")
     grace = build_metrics(snapshot, "home")
-    assert not grace[f"{key}_online"].available
-    assert grace[f"{key}_online"].value is None
+    assert grace[f"{key}_tracker"].available
+    assert grace[f"{key}_tracker"].value is True
+    snapshot["status"]["tracker_available"] = False
+    assert not build_metrics(snapshot, "home")[f"{key}_tracker"].available
     assert grace[f"{key}_signal_db"].available
     snapshot["status"]["stale"] = True
     stale = build_metrics(snapshot, "home")
@@ -174,7 +176,7 @@ def test_collection_error_grace_and_stale_deadline_have_distinct_availability(st
     assert all(
         not metric.available
         for key, metric in stale.items()
-        if key not in {"collection_health", "last_success"} and not key.endswith("_last_seen")
+        if key not in {"collection_health", "last_success"} and not key.endswith(("_last_seen", "_tracker"))
     )
     assert stale["cluster_clients"].value == grace["cluster_clients"].value
 

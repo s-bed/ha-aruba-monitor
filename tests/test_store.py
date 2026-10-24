@@ -598,6 +598,29 @@ def test_cleanup_skips_current_clients_and_inventory(store, time_at):
     assert store.cleanup(1, 1, at=time_at(0)) == {"clients": 0, "ssids": 0}
 
 
+def test_cleanup_enabled_tracker_protects_every_identity_alias_until_disabled(store, time_at):
+    first, second = client(), client(mac="aa:bb:cc:00:00:02")
+    store.ingest([first, second], [], [], time_at(-60 * 86400))
+    device = store.clients()[0]["id"]
+    store.link(device, next(row["mac"] for row in store.clients() if row["id"] != device))
+    store.ingest([], [], [], time_at(0))
+    assert store.cleanup(30, None, time_at(0), {second["mac"]}) == {"clients": 0, "ssids": 0}
+    assert len(store.clients()[0]["macs"]) == 2
+    # Registry exemption is transient and does not become explicit protection.
+    assert not store.clients()[0]["protected"]
+    assert store.cleanup(30, None, time_at(0), set()) == {"clients": 1, "ssids": 0}
+    assert not store.clients()
+
+
+def test_enabled_tracker_does_not_block_explicit_manual_deletion(store, time_at):
+    store.ingest([client()], [], [], time_at(-60 * 86400))
+    device = store.clients()[0]["id"]
+    store.ingest([], [], [], time_at(0))
+    assert store.cleanup(30, None, time_at(0), {client()["mac"]}) == {"clients": 0, "ssids": 0}
+    store.delete_client(device)
+    assert not store.clients()
+
+
 def test_ssid_deletion_is_exact_and_preserves_campaigns_and_sightings(store, time_at):
     names = ["Old Wi-Fi", "old wi-fi", "Old Wi-Fi "]
     store.ingest([client()], [ap()], [{"ssid": name} for name in names], time_at(0))

@@ -677,6 +677,7 @@ test("client details expose protection and explain deletion blockers with escape
   assert.match(html, /id="client-protected" type="checkbox" checked/);
   assert.match(html, /Protect from automatic cleanup/);
   assert.match(html, /Retain this client even after the automatic cleanup period/);
+  assert.match(html, /Clients with enabled Presence trackers are also retained automatically/);
   assert.match(html, /data-delete-client="device-0" disabled/);
   assert.match(html, /Referenced by campaign &lt;Rotation&gt; &amp; &quot;more&quot;/);
   assert.doesNotMatch(html, /campaign <Rotation>/);

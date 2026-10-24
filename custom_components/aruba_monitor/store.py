@@ -475,7 +475,11 @@ class Store:
         self._set("ssid_last_seen", ssid_seen)
 
     def cleanup(
-        self, client_retention_days: int | None, ssid_retention_days: int | None, at: str | None = None
+        self,
+        client_retention_days: int | None,
+        ssid_retention_days: int | None,
+        at: str | None = None,
+        additional_protected_macs: set[str] | None = None,
     ) -> dict[str, int]:
         """Expire absent inventory after a successful poll, preserving campaign history."""
         for days in (client_retention_days, ssid_retention_days):
@@ -489,7 +493,7 @@ class Store:
             if self._collection_delete_reason(status):
                 return removed
             if client_retention_days is not None:
-                protected = self._protected_macs()
+                protected = self._protected_macs() | (additional_protected_macs or set())
                 for device in list(self.db.execute("SELECT id FROM devices")):
                     aliases = list(
                         self.db.execute("SELECT * FROM aliases WHERE device_id=?", (device["id"],))

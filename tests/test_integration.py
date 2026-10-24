@@ -185,7 +185,7 @@ def test_component_imports_with_only_its_packaged_directory(tmp_path):
     check = """
 from importlib import import_module
 from pathlib import Path
-for module in ("", ".aruba", ".coordinator", ".config_flow", ".sensor", ".binary_sensor", ".websocket", ".backup"):
+for module in ("", ".aruba", ".coordinator", ".config_flow", ".sensor", ".binary_sensor", ".device_tracker", ".websocket", ".backup"):
     import_module("custom_components.aruba_monitor" + module)
 component = Path("custom_components/aruba_monitor")
 assert (component / "frontend/panel.js").is_file()
@@ -298,4 +298,69 @@ async def test_ssid_devices_retained_until_explicit_deletion_without_losing_clie
     assert all(not entities.async_get(entity.entity_id) for entity in native_entities)
     assert {row["id"] for row in coordinator.snapshot["clients"]} == {row["id"] for row in clients}
     assert all(row["sightings"] for row in coordinator.snapshot["clients"])
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_startup_removes_only_legacy_connectivity_entries_even_during_outage(hass, tmp_path, transport):
+    from homeassistant.helpers import entity_registry as er
+
+    hass.config.config_dir = str(tmp_path)
+    entry = MockConfigEntry(domain=DOMAIN, data=SETTINGS, unique_id="home", version=1)
+    entry.add_to_hass(hass)
+    other = MockConfigEntry(domain=DOMAIN, data=SETTINGS, unique_id="other", version=2)
+    other.add_to_hass(hass)
+    registry = er.async_get(hass)
+    devices = dr.async_get(hass)
+    device = devices.async_get_or_create(
+        config_entry_id=entry.entry_id, identifiers={(DOMAIN, "aruba_home_client_legacy")}
+    )
+    legacy = []
+    for suffix, disabled in [("1", None), ("2", er.RegistryEntryDisabler.USER)]:
+        legacy.append(
+            registry.async_get_or_create(
+                "binary_sensor",
+                DOMAIN,
+                f"aruba_home_client_{suffix * 24}_online",
+                config_entry=entry,
+                device_id=device.id,
+                disabled_by=disabled,
+            )
+        )
+    preserved = [
+        registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            f"aruba_home_client_{'1' * 24}_last_seen",
+            config_entry=entry,
+            device_id=device.id,
+            disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+        ),
+        registry.async_get_or_create(
+            "binary_sensor",
+            DOMAIN,
+            f"aruba_home_ap_{'1' * 24}_online",
+            config_entry=entry,
+        ),
+        registry.async_get_or_create(
+            "binary_sensor",
+            DOMAIN,
+            f"aruba_home_client_{'3' * 24}_online",
+            config_entry=other,
+        ),
+        registry.async_get_or_create(
+            "binary_sensor",
+            "other_integration",
+            f"aruba_home_client_{'4' * 24}_online",
+            config_entry=entry,
+        ),
+    ]
+    transport.side_effect = ArubaError("Controller unavailable")
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert all(registry.async_get(row.entity_id) is None for row in legacy)
+    assert all(registry.async_get(row.entity_id) is not None for row in preserved)
+    assert devices.async_get(device.id) is not None
+    assert entry.version == 2
+    assert entry.options["auto_delete_clients"] is True
+    assert entry.options["track_new_devices"] is False
     assert await hass.config_entries.async_unload(entry.entry_id)

@@ -171,13 +171,13 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
             via_device=(DOMAIN, parent_id),
         )
         add(
-            f"{key}_online",
-            "Wi-Fi connected",
-            connected if status["fresh"] else None,
+            f"{key}_tracker",
+            "Presence",
+            connected,
             device,
-            platform="binary_sensor",
-            online=status["fresh"],
-            device_class="connectivity",
+            platform="device_tracker",
+            online=status.get("tracker_available", bool(last_success)),
+            enabled_by_default=status.get("track_new_devices", False),
         )
         for field, label, unit, device_class in (
             ("ip", "IP address", None, None),
