@@ -372,3 +372,30 @@ def test_version_one_with_weakened_column_definition_is_rejected(tmp_path):
         db.executescript("DROP TABLE devices; CREATE TABLE devices (id TEXT PRIMARY KEY, label TEXT);")
     with pytest.raises(ValueError, match="column definition"):
         Store(path)
+
+
+def test_network_only_lists_latest_discovered_ssids_and_preserves_history(store, time_at):
+    store.ingest([client()], [ap()], inventory(), time_at(0))
+    campaign_id = store.create_campaign("Rotation", "Old Wi-Fi", "Future Wi-Fi", time_at(1))
+    before = store.network()
+    store.failure("Controller unreachable")
+    assert store.network()["ssids"] == before["ssids"]
+    # An invalid collection rolls back every inventory change.
+    with pytest.raises(KeyError):
+        store.ingest([], [ap()], [{"ssid": "New Wi-Fi"}, {}], time_at(2))
+    assert store.network()["ssids"] == before["ssids"]
+    store.ingest([client(ssid="New Wi-Fi")], [ap()], [{"ssid": "New Wi-Fi"}], time_at(3))
+    assert [ssid["ssid"] for ssid in store.network()["ssids"]] == ["New Wi-Fi"]
+    assert store.network()["ssids"][0]["clients"] == 1
+    assert {row["ssid"] for row in store.clients()[0]["sightings"]} == {"Old Wi-Fi", "New Wi-Fi"}
+    saved = next(row for row in store.campaigns() if row["id"] == campaign_id)
+    assert saved["counts"]["confirmed"] == 1
+    store.ingest([], [ap()], [], time_at(4))
+    assert store.network()["ssids"] == []
+    assert len(store.clients()[0]["sightings"]) == 2
+    # Rediscovery uses the exact same SSID identity, including case and spaces.
+    store.ingest([], [ap()], [{"ssid": "Old Wi-Fi"}, {"ssid": "old wi-fi "}], time_at(5))
+    rediscovered = store.network()["ssids"]
+    original = next(row for row in before["ssids"] if row["ssid"] == "Old Wi-Fi")
+    assert rediscovered[0]["id"] == original["id"]
+    assert rediscovered[1]["id"] != original["id"]

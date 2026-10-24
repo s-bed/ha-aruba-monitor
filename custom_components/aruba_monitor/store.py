@@ -326,13 +326,10 @@ class Store:
                 )
             names = {
                 json.loads(row[0])["ssid"]
-                for row in self.db.execute("SELECT payload FROM inventory WHERE kind='ssid'")
+                for row in self.db.execute(
+                    "SELECT payload FROM inventory WHERE kind='ssid' AND seen_at=?", (last,)
+                )
             }
-            names.update(row[0] for row in self.db.execute("SELECT DISTINCT ssid FROM sightings"))
-            names.update(
-                row[0]
-                for row in self.db.execute("SELECT source FROM campaigns UNION SELECT target FROM campaigns")
-            )
             ssids = []
             for name in sorted(names):
                 clients = [client for client in current if client["ssid"] == name]
@@ -341,9 +338,6 @@ class Store:
                     by_ap[client["ap"]] = by_ap.get(client["ap"], 0) + 1
                     band = client.get("band") or "unknown"
                     by_band[band] = by_band.get(band, 0) + 1
-                known = self.db.execute(
-                    "SELECT seen_at FROM inventory WHERE kind='ssid' AND id=?", (ssid_id(name),)
-                ).fetchone()
                 ssids.append(
                     {
                         "id": ssid_id(name),
@@ -351,7 +345,7 @@ class Store:
                         "clients": len(clients),
                         "by_ap": by_ap,
                         "by_band": by_band,
-                        "in_inventory": bool(known and known[0] == last),
+                        "in_inventory": True,
                         "stale": status["stale"],
                     }
                 )

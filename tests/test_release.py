@@ -1,10 +1,13 @@
 """Exercise release bookkeeping and atomic publication against isolated Git repos."""
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.prepare_release import MANIFEST, git, prepare, push, version_tuple
 
@@ -266,3 +269,61 @@ def test_old_manual_rerun_preserves_remote_latest_and_version_tag(repository):
     assert rerun == {**first, "created": "false", "publish_latest": "false"}
     assert git(target, "rev-parse", "latest") == second["sha"]
     assert git(target, "rev-parse", first["tag"]) == original_version_tag
+
+
+@pytest.mark.parametrize("exists,has_asset", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("publish_latest", ["true", "false"])
+def test_workflow_publication_uses_version_title_for_new_and_retried_releases(
+    repository, tmp_path, exists, has_asset, publish_latest
+):
+    """Run the actual publishing step with a fake gh; never publish a live release."""
+    release = prepare(repository, run_id=12345)
+    workflow = yaml.safe_load(Path(".github/workflows/release.yml").read_text())
+    step = next(step for step in workflow["jobs"]["release"]["steps"] if "RELEASE_TAG" in step.get("env", {}))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls_path = tmp_path / "calls.jsonl"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "with Path(os.environ['GH_CALLS']).open('a') as log:\n"
+        "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "if sys.argv[1:3] == ['release', 'view']:\n"
+        "    if os.environ['RELEASE_EXISTS'] != 'true':\n"
+        "        sys.exit(1)\n"
+        "    if '--json' in sys.argv and os.environ['RELEASE_HAS_ASSET'] == 'true':\n"
+        "        print('aruba_monitor.zip')\n"
+    )
+    gh.chmod(0o755)
+    subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", step["run"]],
+        cwd=repository,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "GH_CALLS": str(calls_path),
+            "RELEASE_EXISTS": str(exists).lower(),
+            "RELEASE_HAS_ASSET": str(has_asset).lower(),
+            "RELEASE_TAG": release["tag"],
+            "RELEASE_SHA": release["sha"],
+            "PUBLISH_LATEST": publish_latest,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_RUN_ID": "12345",
+            "RUNNER_TEMP": str(tmp_path),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    mutations = [args for args in calls if args[1] in {"create", "edit"}]
+    assert [args[1] for args in mutations] == (["edit"] if exists else ["create", "edit"])
+    for args in mutations:
+        assert args[2] == release["tag"]
+        assert args[args.index("--title") + 1] == release["tag"]
+        assert f"--latest={publish_latest}" in args
+    assert "--draft=false" in mutations[-1]
+    uploads = [args for args in calls if args[1] == "upload"]
+    assert len(uploads) == int(exists and not has_asset)

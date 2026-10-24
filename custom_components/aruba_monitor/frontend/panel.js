@@ -15,6 +15,9 @@ class ArubaMonitorPanel extends HTMLElement {
     this.inFlight = null;
     this.openDevice = null;
     this.deviceRequest = 0;
+    this.deviceOptions = [];
+    this.deviceMatches = [];
+    this.activeDeviceOption = -1;
     this.campaignQueries = new Map();
     this.campaignStates = new Map();
     this.expandedCampaigns = new Set();
@@ -73,6 +76,13 @@ class ArubaMonitorPanel extends HTMLElement {
     this.shadowRoot.addEventListener("click", event => this.onClick(event));
     this.shadowRoot.addEventListener("input", event => this.onInput(event));
     this.shadowRoot.addEventListener("change", event => this.onInput(event));
+    this.shadowRoot.addEventListener("keydown", event => this.onDevicePickerKey(event));
+    this.shadowRoot.addEventListener("focusin", event => {
+      if (event.target.id === "ha-device-search") this.renderDeviceOptions();
+    });
+    this.shadowRoot.addEventListener("focusout", event => {
+      if (event.target.closest(".device-picker") && !event.relatedTarget?.closest(".device-picker")) this.closeDeviceOptions();
+    });
     this.shadowRoot.addEventListener("submit", event => this.onSubmit(event));
     this.shadowRoot.addEventListener("toggle", event => this.onToggle(event), true);
     this.shadowRoot.addEventListener("focusout", () => queueMicrotask(() => this.renderPending()));
@@ -180,57 +190,119 @@ class ArubaMonitorPanel extends HTMLElement {
   }
 
   renderNetwork() {
-    this.$("#network-summary").innerHTML = stat(this.data.total_clients, "Clients in latest snapshot") + stat(this.data.aps.filter(ap => ap.online).length, "APs in latest snapshot") + stat(this.data.ssids.length, "Known SSIDs");
+    const ssids = this.data.ssids.filter(ssid => ssid.in_inventory);
+    this.$("#network-summary").innerHTML = stat(this.data.total_clients, "Clients in latest snapshot") + stat(this.data.aps.filter(ap => ap.online).length, "APs in latest snapshot") + stat(ssids.length, "Discovered SSIDs");
     this.$("#ap-list").innerHTML = this.data.aps.length ? this.data.aps.map(ap => `<article class="card"><div class="card-head"><h3>${e(ap.name)} ${ap.is_vc ? '<span class="caption">VC</span>' : ""}</h3>${badge(this.data.status.fresh ? ap.online ? "connected" : "offline" : "unknown", this.data.status.fresh ? ap.online ? "Online" : "Offline" : "Unknown")}</div>
       <div class="ap-meta">${e(ap.model || "Unknown model")} · ${e(ap.ip)}<br>Serial ${e(ap.serial)} · ${e(ap.clients ?? "—")} clients<br>Uplink ${e(ap.uplink || "Unknown")} · Mesh ${e(ap.mesh_role || "Unknown")}</div>
       <div class="table-wrap" data-scroll-key="ap-${e(ap.serial)}"><table><thead><tr><th>RADIO</th><th>CHANNEL</th><th>POWER</th><th>UTIL.</th><th>NOISE</th></tr></thead><tbody>${ap.radios.map(radio => `<tr><td>${e(radio.index)}<small>${e(radio.band || "Unknown band")}</small></td><td>${e(radio.channel)}</td><td>${e(radio.power_dbm ?? "—")} dBm</td><td>${e(radio.utilization_pct ?? "—")}%</td><td>${e(radio.noise_floor_dbm ?? "—")} dBm</td></tr>`).join("") || '<tr><td colspan="5">No reported radio data</td></tr>'}</tbody></table></div></article>`).join("") : empty("No AP observations yet", "Check collection status in the footer.");
     const splits = values => Object.entries(values).map(([name, count]) => `<span>${e(name)}: ${e(count)}</span>`).join("") || '<span>0 clients</span>';
-    this.$("#ssid-list").innerHTML = this.data.ssids.length ? `<div class="card table-wrap" data-scroll-key="ssids"><table><thead><tr><th>SSID</th><th>CLIENTS</th><th>BY AP</th><th>BY BAND</th></tr></thead><tbody>${this.data.ssids.map(ssid => `<tr><td>${e(ssid.ssid)}<small>${ssid.in_inventory ? "In latest inventory" : "Historical / configured for a campaign"}</small></td><td>${e(ssid.clients)}</td><td><div class="split">${splits(ssid.by_ap)}</div></td><td><div class="split">${splits(ssid.by_band)}</div></td></tr>`).join("")}</tbody></table></div>` : empty("No SSIDs observed yet", "Configured SSIDs appear even when they have no clients.");
+    this.$("#ssid-list").innerHTML = ssids.length ? `<div class="card table-wrap" data-scroll-key="ssids"><table><thead><tr><th>SSID</th><th>CLIENTS</th><th>BY AP</th><th>BY BAND</th></tr></thead><tbody>${ssids.map(ssid => `<tr><td>${e(ssid.ssid)}<small>In latest inventory</small></td><td>${e(ssid.clients)}</td><td><div class="split">${splits(ssid.by_ap)}</div></td><td><div class="split">${splits(ssid.by_band)}</div></td></tr>`).join("")}</tbody></table></div>` : empty("No SSIDs discovered", "SSIDs reported by the controller appear here, including those with no clients. History remains in client details and migrations.");
   }
 
   renderDevice(id, preserveDraft = false) {
-    const selectedMac = preserveDraft ? this.$("#alias-mac")?.value : undefined;
     const selectedDevice = preserveDraft ? this.$("#ha-device-target")?.value : undefined;
+    const pickerDraft = preserveDraft ? {query: this.$("#ha-device-search")?.value, expanded: this.$("#ha-device-search")?.getAttribute("aria-expanded") === "true"} : undefined;
     const client = this.data.clients.find(item => item.id === id);
     if (!client) { this.$("#device-dialog").close(); this.openDevice = null; return; }
     this.openDevice = id;
-    const otherMacs = this.data.clients.filter(item => item.id !== id).flatMap(item => item.macs.map(mac => ({mac, name: title(item)})));
     this.$("#device-content").innerHTML = `<div class="section-heading"><div><h2>${e(title(client))}</h2><p class="muted">First seen ${e(stamp(client.first_seen))}</p></div><button class="icon-button" data-close="device-dialog" aria-label="Close">×</button></div>
-      <div class="device-detail-grid">
-      <section class="device-column"><h3>Home Assistant devices</h3><div id="device-ha-links" aria-live="polite"><p class="muted">Loading devices…</p></div></section>
-      <section class="device-column device-identities">
-      <h3>MAC identities</h3><p class="muted">Link only MACs you have verified belong to this device. Migration evidence is recalculated; observations are preserved.</p>
-      ${client.macs.map(mac => `<div class="alias-row"><span class="mono">${e(mac)}</span>${client.macs.length > 1 ? `<button class="secondary" data-unlink="${e(mac)}">Unlink</button>` : ""}</div>`).join("")}
-      ${otherMacs.length ? `<form id="alias-form"><label for="alias-mac">Link an observed MAC from another device</label><div class="form-row"><select id="alias-mac" name="mac">${otherMacs.map(item => `<option value="${e(item.mac)}">${e(item.name)} · ${e(item.mac)}</option>`).join("")}</select><button>Link MAC</button></div></form>` : '<p class="muted">Other observed MAC addresses will be available to link here.</p>'}
-      </section><section class="device-history"><h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div></section></div><p id="device-error" class="error" role="alert"></p>`;
-    const select = this.$("#alias-mac");
-    if (select && Array.from(select.options).some(option => option.value === selectedMac)) select.value = selectedMac;
-    return this.loadDeviceLinks(id, selectedDevice);
+      <div id="device-ha-links" class="device-detail-grid" aria-live="polite"><section class="device-column"><h3>Aruba Monitor device</h3><p class="muted">Loading device…</p></section><section class="device-column device-linking"><h3>Linked devices</h3><p class="muted">Loading devices…</p></section></div>
+      <section class="device-history"><h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div></section><p id="device-error" class="error" role="alert"></p>`;
+    return this.loadDeviceLinks(id, selectedDevice, pickerDraft);
   }
 
-  renderDeviceLinks(result, selectedDevice) {
+  renderDeviceLinks(result, selectedDevice, pickerDraft) {
     const dialog = this.$("#device-dialog");
     const scroll = dialog.scrollTop;
     const rows = devices => devices.map(device => `<a class="ha-device-card" href="/config/devices/device/${e(encodeURIComponent(device.id))}"><svg class="device-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span class="ha-device-details"><strong>${e(device.name)}</strong><small>${e(device.integration === "aruba_monitor" ? "Aruba Monitor" : device.integration.replaceAll("_", " "))}</small><small class="mono">${device.macs.map(e).join(", ")}</small></span><span class="device-chevron" aria-hidden="true">›</span></a>`).join("");
     const options = result.device_options || [];
+    this.deviceOptions = options;
     this.$("#device-ha-links").innerHTML =
-      (result.devices.length ? rows(result.devices) : '<p class="muted">This client’s Home Assistant device is not registered yet.</p>') +
-      '<h3>Linked devices</h3>' +
+      `<section class="device-column"><h3>Aruba Monitor device${result.devices.length > 1 ? "s" : ""}</h3>` +
+      (result.devices.length ? rows(result.devices) : '<p class="muted">This client’s Aruba Monitor device is not registered yet.</p>') +
+      '</section><section class="device-column device-linking"><h3>Linked devices</h3>' +
       (result.linked_devices.length ? rows(result.linked_devices) : '<p class="muted">No linked Home Assistant devices found.</p>') +
-      (options.length ? `<form id="ha-device-link-form"><label for="ha-device-target">Link a Home Assistant device</label><div class="form-row"><select id="ha-device-target" name="target_device_id" required><option value="" disabled selected>Choose a device…</option>${options.map(device => `<option value="${e(device.id)}">${e(device.name)} · ${e(device.integration.replaceAll("_", " "))}</option>`).join("")}</select><button>Link device</button></div><p class="caption">Adds this client’s MAC addresses to the selected device in Home Assistant. Choose only a device you recognize as the same hardware.</p></form>` : '<p class="caption">Other Home Assistant devices will appear here when available to link.</p>');
-    const select = this.$("#ha-device-target");
-    if (select && Array.from(select.options).some(option => option.value === selectedDevice)) select.value = selectedDevice;
+      (options.length ? `<form id="ha-device-link-form" class="device-link-panel"><div class="device-link-heading"><label for="ha-device-search">Link a Home Assistant device</label><span class="help-tooltip"><button type="button" class="help-button" aria-label="About linking a Home Assistant device" aria-describedby="ha-device-link-tooltip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg></button><span id="ha-device-link-tooltip" class="help-tooltip-text" role="tooltip">Adds this client’s MAC addresses to the selected device in Home Assistant. Choose only a device you recognize as the same hardware.</span></span></div><p class="caption" id="ha-device-help">Search by name or integration, then select the matching device.</p><div class="device-picker"><div class="device-search-field"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="ha-device-search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="ha-device-results" aria-describedby="ha-device-help ha-device-selection" autocomplete="off" placeholder="Search devices…"><button type="button" id="ha-device-clear" class="icon-button" aria-label="Clear device selection and search" hidden>×</button></div><input id="ha-device-target" type="hidden" name="target_device_id"><div id="ha-device-results" class="device-results" role="listbox" aria-label="Matching Home Assistant devices" hidden></div></div><div class="device-link-actions"><span id="ha-device-selection" class="caption" role="status">No device selected</span><button id="ha-device-submit" type="submit" disabled>Link device</button></div></form>` : '<p class="caption">Other Home Assistant devices will appear here when available to link.</p>') + '</section>';
+    if (options.length) {
+      this.$("#ha-device-target").value = "";
+      this.$("#ha-device-search").value = pickerDraft?.query || "";
+      const selected = options.find(device => device.id === selectedDevice);
+      if (selected) this.selectDeviceOption(selected.id, false);
+      if (pickerDraft?.expanded) this.renderDeviceOptions();
+    }
     dialog.scrollTop = scroll;
   }
 
-  async loadDeviceLinks(id, selectedDevice) {
+  renderDeviceOptions() {
+    const input = this.$("#ha-device-search");
+    if (!input) return;
+    const terms = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const selectedId = this.$("#ha-device-target").value;
+    // A selected label opens the full list again so it is easy to choose another.
+    this.deviceMatches = this.deviceOptions.filter(device => Boolean(selectedId) || terms.every(term =>
+      [device.name, device.integration.replaceAll("_", " "), device.id, ...device.macs].join(" ").toLowerCase().includes(term)));
+    this.activeDeviceOption = -1;
+    input.removeAttribute("aria-activedescendant");
+    input.setAttribute("aria-expanded", "true");
+    this.$("#ha-device-clear").hidden = !input.value;
+    const results = this.$("#ha-device-results");
+    results.hidden = false;
+    results.innerHTML = this.deviceMatches.length ? this.deviceMatches.map((device, index) => `<button type="button" role="option" tabindex="-1" id="ha-device-option-${index}" class="device-option" data-device-option="${e(device.id)}" aria-selected="${device.id === this.$("#ha-device-target").value}"><span class="ha-device-details"><strong>${e(device.name)}</strong><small>${e(device.integration.replaceAll("_", " "))}</small></span><span class="device-option-check" aria-hidden="true">${device.id === this.$("#ha-device-target").value ? "✓" : "+"}</span></button>`).join("") : '<p class="device-no-results" role="status">No matching devices. Try another name or integration.</p>';
+  }
+
+  closeDeviceOptions() {
+    const input = this.$("#ha-device-search");
+    if (!input) return;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    this.$("#ha-device-results").hidden = true;
+    this.activeDeviceOption = -1;
+  }
+
+  selectDeviceOption(id, focus = true) {
+    const device = this.deviceOptions.find(option => option.id === id);
+    if (!device) return;
+    this.$("#ha-device-target").value = id;
+    this.$("#ha-device-search").value = device.name;
+    this.$("#ha-device-selection").textContent = `Selected: ${device.name} · ${device.integration.replaceAll("_", " ")}`;
+    this.$("#ha-device-submit").disabled = false;
+    this.$("#ha-device-clear").hidden = false;
+    if (focus) this.$("#ha-device-search").focus();
+    this.closeDeviceOptions();
+  }
+
+  onDevicePickerKey(event) {
+    if (event.target.id !== "ha-device-search") return;
+    const input = event.target;
+    if (event.key === "Escape" && input.getAttribute("aria-expanded") === "true") {
+      event.preventDefault();
+      event.stopPropagation();
+      this.closeDeviceOptions();
+    } else if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault();
+      if (input.getAttribute("aria-expanded") !== "true") this.renderDeviceOptions();
+      const count = this.deviceMatches.length;
+      if (!count) return;
+      this.activeDeviceOption = event.key === "ArrowDown" ? (this.activeDeviceOption + 1) % count :
+        this.activeDeviceOption <= 0 ? count - 1 : this.activeDeviceOption - 1;
+      const id = `ha-device-option-${this.activeDeviceOption}`;
+      this.shadowRoot.querySelectorAll(".device-option").forEach(option => option.classList.toggle("active", option.id === id));
+      input.setAttribute("aria-activedescendant", id);
+      this.$(`#${id}`).scrollIntoView({block: "nearest"});
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (input.getAttribute("aria-expanded") === "true" && this.activeDeviceOption >= 0) this.selectDeviceOption(this.deviceMatches[this.activeDeviceOption].id);
+    }
+  }
+
+  async loadDeviceLinks(id, selectedDevice, pickerDraft) {
     const request = ++this.deviceRequest;
     const generation = this.generation;
     const current = () => this.mounted && this.generation === generation && this.deviceRequest === request && this.openDevice === id && this.$("#device-dialog").open;
     try {
       const result = await Promise.resolve().then(() => this.command("client_devices", {device_id: id}));
       if (!current()) return;
-      this.renderDeviceLinks(result, selectedDevice);
+      this.renderDeviceLinks(result, selectedDevice, pickerDraft);
     } catch (_error) {
       if (current()) this.$("#device-ha-links").innerHTML = '<p class="error">Could not load Home Assistant devices.</p><button class="secondary" data-retry-device-links="true">Retry</button>';
     }
@@ -252,7 +324,8 @@ class ArubaMonitorPanel extends HTMLElement {
     this.renderClients();
     this.renderCampaigns();
     this.renderNetwork();
-    this.$("#ssid-options").innerHTML = this.data.ssids.map(ssid => `<option value="${e(ssid.ssid)}"></option>`).join("");
+    const ssids = new Set([...this.data.ssids.map(ssid => ssid.ssid), ...this.data.clients.flatMap(client => client.sightings.map(sighting => sighting.ssid)), ...this.data.campaigns.flatMap(campaign => [campaign.source, campaign.target])]);
+    this.$("#ssid-options").innerHTML = [...ssids].sort().map(ssid => `<option value="${e(ssid)}"></option>`).join("");
     main.scrollTop = top;
     for (const element of this.shadowRoot.querySelectorAll("[data-scroll-key]")) {
       if (scroll.has(element.dataset.scrollKey)) element.scrollLeft = scroll.get(element.dataset.scrollKey);
@@ -284,11 +357,21 @@ class ArubaMonitorPanel extends HTMLElement {
   }
 
   async onClick(event) {
+    if (event.target.id === "ha-device-search") {
+      this.renderDeviceOptions();
+      return;
+    }
     const button = event.target.closest("button");
     if (!button) return;
     try {
       if (button.id === "toggle-menu") {
         this.dispatchEvent(new CustomEvent("hass-toggle-menu", {bubbles: true, composed: true}));
+      } else if (button.dataset.deviceOption) {
+        this.selectDeviceOption(button.dataset.deviceOption);
+      } else if (button.id === "ha-device-clear") {
+        this.$("#ha-device-search").value = "";
+        this.onInput({target: this.$("#ha-device-search")});
+        this.$("#ha-device-search").focus();
       } else if (button.dataset.view) {
         const main = this.$("main");
         this.viewScroll.set(this.view, main.scrollTop);
@@ -337,13 +420,6 @@ class ArubaMonitorPanel extends HTMLElement {
           await this.command("campaign_exclude", {campaign_id: button.dataset.campaign, device_id: button.dataset.exclude, excluded, note});
           await this.refresh(true);
         } finally { button.disabled = false; }
-      } else if (button.dataset.unlink) {
-        button.disabled = true;
-        try {
-          await this.command("client_unlink", {device_id: this.openDevice, mac: button.dataset.unlink});
-          await this.refresh(true);
-          this.renderDevice(this.openDevice, true);
-        } finally { button.disabled = false; }
       }
     } catch (error) {
       const deviceError = this.$("#device-error");
@@ -362,6 +438,14 @@ class ArubaMonitorPanel extends HTMLElement {
 
   onInput(event) {
     if (!this.data) return;
+    if (event.target.id === "ha-device-search") {
+      if (event.type === "change") return;
+      this.$("#ha-device-target").value = "";
+      this.$("#ha-device-selection").textContent = "No device selected";
+      this.$("#ha-device-submit").disabled = true;
+      this.renderDeviceOptions();
+      return;
+    }
     if (event.target.id === "client-search") this.renderClients();
     const id = event.target.dataset.campaignSearch || event.target.dataset.campaignState;
     if (!id) return;
@@ -374,6 +458,10 @@ class ArubaMonitorPanel extends HTMLElement {
     event.preventDefault();
     const form = event.target;
     const values = Object.fromEntries(new FormData(form));
+    if (form.id === "ha-device-link-form" && !this.deviceOptions.some(device => device.id === values.target_device_id)) {
+      this.$("#device-error").textContent = "Select a device from the search results first.";
+      return;
+    }
     const deviceId = this.openDevice;
     const generation = this.generation;
     let deviceRequest;
@@ -392,10 +480,6 @@ class ArubaMonitorPanel extends HTMLElement {
         if (this.mounted && generation === this.generation && deviceRequest === this.deviceRequest && this.openDevice === deviceId && this.$("#device-dialog").open) {
           this.renderDeviceLinks(result, values.target_device_id);
         }
-      } else if (form.id === "alias-form") {
-        await this.command("client_link", {device_id: this.openDevice, ...values});
-        await this.refresh(true);
-        this.renderDevice(this.openDevice, true);
       }
     } catch (error) {
       if (form.id === "ha-device-link-form" && (!this.mounted || generation !== this.generation || deviceRequest !== this.deviceRequest || this.openDevice !== deviceId || !this.$("#device-dialog").open)) return;

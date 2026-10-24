@@ -76,7 +76,7 @@ jobs:
           done
           echo 'Release refs could not be published after three attempts.' >&2
           exit 1
-      - name: Publish versioned release named latest
+      - name: Publish versioned release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -95,11 +95,11 @@ jobs:
           fi
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag \
-              --title latest --latest="$PUBLISH_LATEST" \
+              --title "$RELEASE_TAG" --latest="$PUBLISH_LATEST" \
               --notes "$release_notes" \
               "$RUNNER_TEMP/aruba_monitor.zip"
           elif [[ -z "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | select(.name == "aruba_monitor.zip") | .name')" ]]; then
             gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/aruba_monitor.zip"
           fi
           # Also finish a draft left behind by an interrupted create/upload.
-          gh release edit "$RELEASE_TAG" --draft=false --title latest --latest="$PUBLISH_LATEST"
+          gh release edit "$RELEASE_TAG" --draft=false --title "$RELEASE_TAG" --latest="$PUBLISH_LATEST"
