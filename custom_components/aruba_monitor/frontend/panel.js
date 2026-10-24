@@ -6,6 +6,7 @@ const title = client => client.label || client.name || client.macs[0];
 const deviceButton = client => `<button class="device-name" data-device="${e(client.id)}">${e(title(client))}</button>`;
 const empty = (heading, text) => `<div class="empty"><h3>${e(heading)}</h3><p class="muted">${e(text)}</p></div>`;
 const stat = (value, label) => `<div class="stat"><strong>${e(value)}</strong><span>${e(label)}</span></div>`;
+const help = (id, label, text) => `<span class="help-tooltip"><button type="button" class="help-button" aria-label="${e(label)}" aria-describedby="${e(id)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg></button><span id="${e(id)}" class="help-tooltip-text" role="tooltip">${e(text)}</span></span>`;
 
 class ArubaMonitorPanel extends HTMLElement {
   constructor() {
@@ -32,7 +33,7 @@ class ArubaMonitorPanel extends HTMLElement {
       <link rel="stylesheet" href="${new URL("./panel.css", import.meta.url).href}">
       <div class="shell">
       <header>
-        <div class="brand"><button class="menu-button" id="toggle-menu" aria-label="Toggle Home Assistant sidebar">☰</button><span class="brand-mark" aria-hidden="true">a</span><h1>Aruba monitor</h1><span id="site-name" class="site-name muted"></span></div>
+        <div class="brand"><span class="brand-mark" aria-hidden="true">a</span><h1>Aruba monitor</h1><span id="site-name" class="site-name muted"></span></div>
         <nav aria-label="Dashboard views">
           <button data-view="clients" aria-selected="true">Clients <span id="client-count" class="count">0</span></button>
           <button data-view="network" aria-selected="false">Network</button>
@@ -42,14 +43,13 @@ class ArubaMonitorPanel extends HTMLElement {
       <main>
         <div id="notice" class="notice" role="alert" hidden></div>
         <section id="clients" class="view">
-          <div class="section-heading"><h2>Known clients</h2><label class="search-label"><span class="sr-only">Search clients</span><input id="client-search" type="search" placeholder="Search name, MAC, SSID or AP"></label></div>
-          <p class="caption">Enable Presence in a client’s Home Assistant device to track home and away. Enabled trackers are retained automatically. Configure new-device tracking and cleanup in the integration options.</p>
+          <div class="section-heading"><div class="heading-help"><h2>Known clients</h2>${help("clients-help", "About Presence tracking and client cleanup", "Enable Presence in a client’s Home Assistant device to track home and away. Enabled trackers are retained automatically. Configure new-device tracking and cleanup in the integration options.")}</div><label class="search-label"><span class="sr-only">Search clients</span><input id="client-search" type="search" placeholder="Search name, MAC, SSID or AP"></label></div>
           <div id="clients-table"></div>
         </section>
         <section id="network" class="view" hidden>
           <div id="network-summary" class="stats"></div>
           <div class="section-heading"><h2>Access points</h2></div><div id="ap-list" class="ap-grid"></div>
-          <div class="section-heading"><h2>SSIDs</h2></div><p class="caption">Automatic cleanup can be configured in the integration options.</p><div id="ssid-list"></div>
+          <div class="section-heading"><div class="heading-help"><h2>SSIDs</h2>${help("ssids-help", "About SSID cleanup", "Automatic cleanup can be configured in the integration options.")}</div></div><div id="ssid-list"></div>
         </section>
         <section id="migrations" class="view" hidden>
           <div class="section-heading"><h2>Migration campaigns</h2><button id="new-campaign">New campaign</button></div>
@@ -212,7 +212,7 @@ class ArubaMonitorPanel extends HTMLElement {
     this.$("#device-content").innerHTML = `<div class="section-heading"><div><h2>${e(title(client))}</h2><p class="muted">First seen ${e(stamp(client.first_seen))}</p></div><button class="icon-button" data-close="device-dialog" aria-label="Close">×</button></div>
       <div id="device-ha-links" class="device-detail-grid" aria-live="polite"><section class="device-column"><h3>Aruba Monitor device</h3><p class="muted">Loading device…</p></section><section class="device-column device-linking"><h3>Linked devices</h3><p class="muted">Loading devices…</p></section></div>
       <section class="device-history"><h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div></section>
-      <section class="client-retention"><h3>Inventory cleanup</h3><label class="checkbox-label"><input id="client-protected" type="checkbox" ${protectedValue ? "checked" : ""} ${protectionWrite ? "disabled" : ""} aria-describedby="client-protection-help">Protect from automatic cleanup</label><p id="client-protection-help" class="caption">Retain this client even after the automatic cleanup period. Clients with enabled Presence trackers are also retained automatically. You can still delete it manually when it is no longer detected. Automatic cleanup is configured in the integration options.</p><div class="client-delete"><button class="secondary danger" data-delete-client="${e(client.id)}" ${client.delete_allowed === true ? "" : "disabled"}>Delete client</button><p class="caption delete-reason">${e(client.delete_allowed === true ? "Permanently remove this client and its local observation history." : client.delete_reason || "Deletion requires a successful, fresh collection.")}</p></div></section><p id="device-error" class="error" role="alert"></p>`;
+      <section class="client-retention"><h3>Inventory cleanup</h3><div class="client-protection"><label class="checkbox-label"><input id="client-protected" type="checkbox" ${protectedValue ? "checked" : ""} ${protectionWrite ? "disabled" : ""} aria-describedby="client-protection-help">Protect from automatic cleanup</label>${help("client-protection-help", "About automatic cleanup protection", "Retain this client even after the automatic cleanup period. Clients with enabled Presence trackers are also retained automatically. You can still delete it manually when it is no longer detected. Automatic cleanup is configured in the integration options.")}</div><div class="client-delete"><button class="secondary danger" data-delete-client="${e(client.id)}" ${client.delete_allowed === true ? "" : "disabled"}>Delete client</button>${help("client-delete-help", "About deleting this client", "Permanently remove this client and its local observation history, including its membership, exclusions and evidence in all migration campaigns.")}${client.delete_allowed === true ? "" : `<p class="caption delete-reason">${e(client.delete_reason || "Deletion requires a successful, fresh collection.")}</p>`}</div></section><p id="device-error" class="error" role="alert"></p>`;
     return this.loadDeviceLinks(id, selectedDevice, pickerDraft);
   }
 
@@ -227,7 +227,7 @@ class ArubaMonitorPanel extends HTMLElement {
       (result.devices.length ? rows(result.devices) : '<p class="muted">This client’s Aruba Monitor device is not registered yet.</p>') +
       '</section><section class="device-column device-linking"><h3>Linked devices</h3>' +
       (result.linked_devices.length ? rows(result.linked_devices) : '<p class="muted">No linked Home Assistant devices found.</p>') +
-      (options.length ? `<form id="ha-device-link-form" class="device-link-panel"><div class="device-link-heading"><label for="ha-device-search">Link a Home Assistant device</label><span class="help-tooltip"><button type="button" class="help-button" aria-label="About linking a Home Assistant device" aria-describedby="ha-device-link-tooltip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg></button><span id="ha-device-link-tooltip" class="help-tooltip-text" role="tooltip">Adds this client’s MAC addresses to the selected device in Home Assistant. Choose only a device you recognize as the same hardware.</span></span></div><p class="caption" id="ha-device-help">Search by name or integration, then select the matching device.</p><div class="device-picker"><div class="device-search-field"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="ha-device-search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="ha-device-results" aria-describedby="ha-device-help ha-device-selection" autocomplete="off" placeholder="Search devices…"><button type="button" id="ha-device-clear" class="icon-button" aria-label="Clear device selection and search" hidden>×</button></div><input id="ha-device-target" type="hidden" name="target_device_id"><div id="ha-device-results" class="device-results" role="listbox" aria-label="Matching Home Assistant devices" hidden></div></div><div class="device-link-actions"><span id="ha-device-selection" class="caption" role="status">No device selected</span><button id="ha-device-submit" type="submit" disabled>Link device</button></div></form>` : '<p class="caption">Other Home Assistant devices will appear here when available to link.</p>') + '</section>';
+      (options.length ? `<form id="ha-device-link-form" class="device-link-panel"><div class="device-link-heading"><label for="ha-device-search">Link a Home Assistant device</label>${help("ha-device-link-tooltip", "About linking a Home Assistant device", "Adds this client’s MAC addresses to the selected device in Home Assistant. Choose only a device you recognize as the same hardware.")}</div><p class="caption" id="ha-device-help">Search by name or integration, then select the matching device.</p><div class="device-picker"><div class="device-search-field"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="ha-device-search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="ha-device-results" aria-describedby="ha-device-help ha-device-selection" autocomplete="off" placeholder="Search devices…"><button type="button" id="ha-device-clear" class="icon-button" aria-label="Clear device selection and search" hidden>×</button></div><input id="ha-device-target" type="hidden" name="target_device_id"><div id="ha-device-results" class="device-results" role="listbox" aria-label="Matching Home Assistant devices" hidden></div></div><div class="device-link-actions"><span id="ha-device-selection" class="caption" role="status">No device selected</span><button id="ha-device-submit" type="submit" disabled>Link device</button></div></form>` : '<p class="caption">Other Home Assistant devices will appear here when available to link.</p>') + '</section>';
     if (options.length) {
       this.$("#ha-device-target").value = "";
       this.$("#ha-device-search").value = pickerDraft?.query || "";
@@ -369,9 +369,7 @@ class ArubaMonitorPanel extends HTMLElement {
     const button = event.target.closest("button");
     if (!button) return;
     try {
-      if (button.id === "toggle-menu") {
-        this.dispatchEvent(new CustomEvent("hass-toggle-menu", {bubbles: true, composed: true}));
-      } else if (button.dataset.deviceOption) {
+      if (button.dataset.deviceOption) {
         this.selectDeviceOption(button.dataset.deviceOption);
       } else if (button.id === "ha-device-clear") {
         this.$("#ha-device-search").value = "";
@@ -402,7 +400,7 @@ class ArubaMonitorPanel extends HTMLElement {
         const id = button.dataset.deleteClient;
         const client = this.data.clients.find(item => item.id === id);
         if (!client || client.delete_allowed !== true) return;
-        if (!window.confirm(`Delete client “${title(client)}”?\n\nThis permanently removes its local client observation history and Aruba Monitor devices and entities. Devices from other integrations are untouched. If detected again, this client will be discovered again.`)) return;
+        if (!window.confirm(`Delete client “${title(client)}”?\n\nThis permanently removes its local client observation history and Aruba Monitor devices and entities. It also removes this client from all migration campaigns, including saved migration evidence and exclusions. Campaign progress will be recalculated. Devices from other integrations are untouched. If detected again, this client will be discovered again.`)) return;
         button.disabled = true;
         const generation = this.generation;
         try {
