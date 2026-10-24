@@ -2,8 +2,9 @@
 
 This repository contains the native Home Assistant integration in
 `custom_components/aruba_monitor/`. All runtime code and assets must remain inside
-that directory for manual and HACS installation. Read `README.md` for setup,
-persistence, and operation; use the code and tests to establish current behavior.
+that directory for manual and HACS installation. Read `README.md` for setup and
+`docs/reference.md` for persistence and operation; use the code and tests to
+establish current behavior.
 
 Target Home Assistant 2026.10+. Controller support remains local Aruba Instant
 AOS-8 only; Instant 8.10.0.16 is the smoke-tested firmware. Sanitized captures are
@@ -152,7 +153,7 @@ CI keeps official hassfest validation, stable releases, and PR preview releases.
 requests and new manual workflow runs automatically bump the patch version and
 publish releases. Reruns must reuse the original release and preserve newer
 `latest` tags. Manual runs always release trusted `main`; see
-`README.md` for the release contract.
+`docs/development.md` for the release contract.
 
 PR preview publishing must execute only trusted main code, packaging PR files as
 Git blobs. Keep preview tags/releases separate from stable versions and `latest`.
