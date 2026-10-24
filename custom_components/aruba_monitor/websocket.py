@@ -7,9 +7,11 @@ import logging
 import probatio as vol
 from homeassistant.components import websocket_api
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN
 from .parser import MAC_RE
+from .store import ssid_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,11 +46,49 @@ def coordinator_for(hass):
     return entries[0].runtime_data
 
 
+def client_devices(hass, coordinator, device_id):
+    """Resolve retained client MACs against HA's cached, per-entry device records."""
+    client = next((item for item in coordinator.snapshot["clients"] if item["id"] == device_id), None)
+    if client is None:
+        raise ValueError("Unknown client")
+    macs = {dr.format_mac(value) for value in client["macs"]}
+    registry = dr.async_get(hass)
+    devices = {}
+    linked_devices = {}
+    for value in sorted(macs):
+        identifier = (DOMAIN, f"aruba_{coordinator.settings.site_id}_client_{ssid_id(value)}")
+        if device := registry.async_get_device_by_identifier(identifier, coordinator.config_entry.entry_id):
+            devices[device.id] = device
+        for device in registry.async_get_devices(connections={(dr.CONNECTION_NETWORK_MAC, value)}):
+            linked_devices[device.id] = device
+
+    def describe(device):
+        matching_macs = sorted(
+            dr.format_mac(value)
+            for kind, value in device.connections
+            if kind == dr.CONNECTION_NETWORK_MAC and dr.format_mac(value) in macs
+        )
+        entry = hass.config_entries.async_get_entry(device.config_entry_id)
+        return {
+            "id": device.id,
+            "name": device.name_by_user or device.name or (matching_macs or sorted(macs))[0],
+            "macs": matching_macs,
+            "integration": entry.domain if entry else "",
+        }
+
+    return {
+        "devices": [describe(device) for device in devices.values()],
+        "linked_devices": [describe(device) for key, device in linked_devices.items() if key not in devices],
+    }
+
+
 async def dispatch(hass, command, msg):
     """Keep mutation validation independent of the WebSocket envelope."""
     coordinator = coordinator_for(hass)
     if command == "snapshot":
         return await coordinator.async_snapshot()
+    if command == "client_devices":
+        return client_devices(hass, coordinator, msg["device_id"])
     if command == "campaign_create":
         name = text(msg["name"], limit=100, trim=True, required=True)
         source, target = ssid(msg["source"]), ssid(msg["target"])
@@ -78,6 +118,7 @@ async def dispatch(hass, command, msg):
 
 COMMAND_FIELDS = {
     "snapshot": {},
+    "client_devices": {"device_id": str},
     "campaign_create": {"name": str, "source": str, "target": str},
     "campaign_complete": {"campaign_id": str},
     "campaign_delete": {"campaign_id": str},

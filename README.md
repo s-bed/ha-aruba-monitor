@@ -34,9 +34,9 @@ Do not run two collectors against the same controller during normal use. Monitor
 
 The **Aruba Monitor** sidebar panel is visible to administrators only. Its authenticated backend also restricts all client/campaign reads and writes to administrators.
 
-- **Migrations:** create campaigns with exact source/target SSIDs; expand each campaign's clients independently. Lists start collapsed and default to **Pending & returned**. Searches, filters and form entry survive automatic refreshes.
-- **Clients:** retained device inventory, labels, explicitly linked MAC identities and per-MAC/SSID observation history. Devices do not age out merely because they are offline.
+- **Clients** opens first: retained device inventory, labels, explicitly linked MAC identities and per-MAC/SSID observation history. Click a client to open its details, follow **Open device** to its Home Assistant device, or view and open linked Home Assistant devices matched by MAC address. Grouped clients show the devices for each linked MAC. Devices do not age out merely because they are offline.
 - **Network:** APs, reported radios, SSID counts and connection splits. The health footer remains visible while the content scrolls.
+- **Migrations** is last: create campaigns with exact source/target SSIDs; expand each campaign's clients independently. Lists start collapsed and default to **Pending & returned**. Searches, filters and form entry survive automatic refreshes.
 
 The panel follows the active HA theme and refreshes every five seconds while mounted. These reads do not poll the controller. All frontend assets are local.
 
@@ -86,7 +86,7 @@ node --test tests/test_panel.js
 
 CI runs official hassfest validation. Run the local checks above before submitting changes, and test against both HA 2026.10.0 and 2026.10.2 using separate environments. Sanitized real controller fixtures are in `tests/fixtures/instant_8_10_0_16`. Synthetic tests and browser mock data do not establish live controller compatibility.
 
-The panel's administrator-only WebSocket commands are namespaced under `aruba_monitor/`: `snapshot`, `campaign_create`, `campaign_complete`, `campaign_delete`, `campaign_exclude`, `client_label`, `client_link`, and `client_unlink`. Panel commands have no network-configuration side effects.
+The panel's administrator-only WebSocket commands are namespaced under `aruba_monitor/`: `snapshot`, `client_devices`, `campaign_create`, `campaign_complete`, `campaign_delete`, `campaign_exclude`, `client_label`, `client_link`, and `client_unlink`. Panel commands have no network-configuration side effects.
 
 ## Releases
 
