@@ -168,6 +168,10 @@ class FakeGitHub(preview.GitHub):
             assert self.release is None, "Attempted to create a duplicate draft release"
             self.release = {"id": 123, **payload}
             return self.release
+        if method == "DELETE":
+            assert path == f"releases/{self.release['id']}"
+            self.release = None
+            return None
         assert method == "PATCH" and path == f"releases/{self.release['id']}"
         self.release.update(payload)
         return self.release
@@ -397,7 +401,7 @@ def test_existing_stable_or_immutable_release_is_not_overwritten(
 def test_workflow_runs_only_trusted_main_and_serializes_publication():
     workflow = Path(".github/workflows/prerelease.yml").read_text()
     assert "pull_request_target:" in workflow
-    assert "types: [opened, reopened, synchronize]" in workflow
+    assert "types: [opened, reopened, synchronize, closed]" in workflow
     assert "workflow_dispatch:" in workflow
     assert "ref: main" in workflow
     assert "cancel-in-progress: false" in workflow
@@ -406,3 +410,199 @@ def test_workflow_runs_only_trusted_main_and_serializes_publication():
     assert '--run-number "$GITHUB_RUN_NUMBER"' in workflow
     assert "pip install" not in workflow
     assert "github.event.pull_request.head.ref" not in workflow
+
+
+@pytest.fixture
+def published_preview(repository, tmp_path, uploads):
+    head = head_change(repository)
+    github = FakeGitHub(head)
+    result = preview.publish(repository, github, 3, head, 123, tmp_path / "preview.zip", run_number=1)
+    return github, result
+
+
+@pytest.mark.parametrize("draft", [False, True])
+@pytest.mark.parametrize("padding", [0, 100])
+def test_cleanup_closed_pr_removes_owned_release_and_tag_only(
+    repository, published_preview, uploads, draft, padding
+):
+    github, _ = published_preview
+    main = preview.text_git(repository, "rev-parse", "HEAD")
+    preview.git(
+        repository, "push", "origin", "HEAD:refs/tags/latest", "HEAD:refs/tags/v0.2.1", "HEAD:refs/tags/pr-4"
+    )
+    before = preview.text_git(repository, "ls-remote", "--refs", "origin").splitlines()
+    github.state = "closed"
+    github.release["draft"] = draft
+    github.other_releases = [{"tag_name": f"v1.0.{i}"} for i in range(padding)]
+    github.calls.clear()
+
+    assert preview.cleanup(repository, github, 3)
+    assert github.release is None
+    assert [(method, path) for method, path, _ in github.calls if method != "GET"] == [
+        ("DELETE", "releases/123")
+    ]
+    assert preview.text_git(repository, "ls-remote", "--refs", "origin").splitlines() == [
+        line for line in before if not line.endswith("refs/tags/pr-3")
+    ]
+    assert preview.text_git(repository, "rev-parse", "HEAD") == main
+    assert preview.text_git(repository, "status", "--porcelain") == ""
+    assert len(uploads) == 1
+    # Repeated close events and manual retries are harmless.
+    assert not preview.cleanup(repository, github, 3)
+
+
+def test_manual_preview_run_for_closed_pr_cleans_up_without_packaging(
+    repository, tmp_path, published_preview, uploads
+):
+    github, result = published_preview
+    github.state = "closed"
+    output = tmp_path / "closed-pr.zip"
+    assert preview.publish(repository, github, 3, "", 124, output, run_number=2) is None
+    assert github.release is None
+    assert preview.text_git(repository, "ls-remote", "origin", f"refs/tags/{result['tag']}") == ""
+    assert not output.exists()
+    assert len(uploads) == 1
+
+
+@pytest.mark.parametrize(
+    "attribute,value", [("state", "open"), ("base", "other"), ("base_repo", "other/repo")]
+)
+def test_cleanup_refuses_open_reopened_or_retargeted_pr(repository, published_preview, attribute, value):
+    github, _ = published_preview
+    github.state = "closed"
+    setattr(github, attribute, value)
+    before = preview.text_git(repository, "ls-remote", "--refs", "origin")
+    github.calls.clear()
+    assert not preview.cleanup(repository, github, 3)
+    assert github.release is not None
+    assert preview.text_git(repository, "ls-remote", "--refs", "origin") == before
+    assert all(method == "GET" for method, _, _ in github.calls)
+
+
+@pytest.mark.parametrize("missing", ["release", "tag"])
+def test_cleanup_recovers_partial_publication_or_partial_cleanup(repository, published_preview, missing):
+    github, _ = published_preview
+    github.state = "closed"
+    if missing == "release":
+        github.release = None
+    else:
+        preview.git(repository, "push", "origin", ":refs/tags/pr-3")
+    assert preview.cleanup(repository, github, 3)
+    assert github.release is None
+    assert preview.text_git(repository, "ls-remote", "origin", "refs/tags/pr-3") == ""
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"prerelease": False},
+        {"immutable": True},
+        {"body": "A manually created release"},
+        {"body": "<!-- aruba-monitor-preview pr=4 run=123 sequence=1 head=" + "a" * 40 + " -->"},
+    ],
+)
+def test_cleanup_refuses_stable_immutable_unmarked_or_other_pr_release(repository, published_preview, change):
+    github, _ = published_preview
+    github.state = "closed"
+    github.release.update(change)
+    github.calls.clear()
+    before = preview.text_git(repository, "ls-remote", "--refs", "origin")
+    with pytest.raises(ValueError, match="mutable prerelease owned by this PR"):
+        preview.cleanup(repository, github, 3)
+    assert github.release is not None
+    assert preview.text_git(repository, "ls-remote", "--refs", "origin") == before
+    assert all(method == "GET" for method, _, _ in github.calls)
+
+
+@pytest.mark.parametrize("orphan", [False, True])
+@pytest.mark.parametrize("replacement", ["stable", "another-pr", "wrong-head"])
+def test_cleanup_validates_tag_ownership_even_with_owned_release(
+    repository, tmp_path, published_preview, orphan, replacement
+):
+    github, result = published_preview
+    github.state = "closed"
+    if orphan:
+        github.release = None
+    if replacement == "stable":
+        replacement_sha = preview.text_git(repository, "rev-parse", "HEAD")
+    elif replacement == "another-pr":
+        replacement_sha = preview.package(repository, github.head, 4, 124, tmp_path / "other.zip")["sha"]
+    else:
+        tree = preview.text_git(repository, "rev-parse", f"{result['sha']}^{{tree}}")
+        replacement_sha = preview.text_git(
+            repository,
+            "commit-tree",
+            tree,
+            "-m",
+            f"Preview PR #3\n\nAruba-Preview-Head: {github.head}\n"
+            "Aruba-Preview-Version: 0.2.2-dev.3.123.g000000000000",
+        )
+    preview.git(repository, "push", "--force", "origin", f"{replacement_sha}:refs/tags/pr-3")
+    before = preview.text_git(repository, "ls-remote", "--refs", "origin")
+    github.calls.clear()
+    with pytest.raises(ValueError, match="tag does not belong"):
+        preview.cleanup(repository, github, 3)
+    assert preview.text_git(repository, "ls-remote", "--refs", "origin") == before
+    assert all(method == "GET" for method, _, _ in github.calls)
+
+
+def test_cleanup_rechecks_closed_state_immediately_before_deletion(
+    repository, published_preview, monkeypatch
+):
+    github, _ = published_preview
+    checks = iter([True, False])
+    monkeypatch.setattr(github, "closed", lambda pr: next(checks))
+    github.calls.clear()
+    before = preview.text_git(repository, "ls-remote", "--refs", "origin")
+    assert not preview.cleanup(repository, github, 3)
+    assert github.release is not None
+    assert preview.text_git(repository, "ls-remote", "--refs", "origin") == before
+    assert all(method == "GET" for method, _, _ in github.calls)
+
+
+def test_cleanup_tag_lease_protects_concurrent_replacement(repository, published_preview, monkeypatch):
+    github, _ = published_preview
+    github.state = "closed"
+    original_git = preview.git
+    replacement = preview.text_git(repository, "rev-parse", "HEAD")
+
+    def race(root, *args, **kwargs):
+        if args[0] == "push" and args[-1] == ":refs/tags/pr-3":
+            original_git(root, "push", "--force", "origin", f"{replacement}:refs/tags/pr-3")
+        return original_git(root, *args, **kwargs)
+
+    monkeypatch.setattr(preview, "git", race)
+    with pytest.raises(subprocess.CalledProcessError):
+        preview.cleanup(repository, github, 3)
+    assert preview.text_git(repository, "ls-remote", "origin", "refs/tags/pr-3").split()[0] == replacement
+
+
+def test_close_during_upload_cleans_up_instead_of_leaving_hidden_preview(
+    repository, tmp_path, uploads, monkeypatch
+):
+    head = head_change(repository)
+    github = FakeGitHub(head)
+    original_run = preview.subprocess.run
+
+    def close_during_upload(command, **kwargs):
+        result = original_run(command, **kwargs)
+        if command[0] == "gh":
+            github.state = "closed"
+        return result
+
+    monkeypatch.setattr(preview.subprocess, "run", close_during_upload)
+    assert preview.publish(repository, github, 3, head, 123, tmp_path / "preview.zip", run_number=1) is None
+    assert len(uploads) == 1
+    assert github.release is None
+    assert preview.text_git(repository, "ls-remote", "origin", "refs/tags/pr-3") == ""
+
+
+def test_github_delete_accepts_empty_success_response(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("GH_TOKEN", "synthetic-token")
+    monkeypatch.setattr(
+        preview.urllib.request, "urlopen", lambda request, timeout: nullcontext(SimpleNamespace(status=204))
+    )
+    assert preview.GitHub("owner/repo").api("DELETE", "releases/123") is None
