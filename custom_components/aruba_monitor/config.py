@@ -26,6 +26,10 @@ class ControllerSettings:
     aruba_ca: str = ""
     interval: float = 30
     timeout: float = 15
+    auto_delete_clients: bool = False
+    client_retention_days: int = 30
+    auto_delete_ssids: bool = False
+    ssid_retention_days: int = 30
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", self.site_id):
@@ -52,10 +56,24 @@ class ControllerSettings:
             raise ValueError("HTTP timeout must be positive")
         if not isinstance(self.aruba_verify_tls, bool):
             raise ValueError("TLS verification must be true or false")
+        for enabled in (self.auto_delete_clients, self.auto_delete_ssids):
+            if not isinstance(enabled, bool):
+                raise ValueError("Automatic cleanup must be true or false")
+        for days in (self.client_retention_days, self.ssid_retention_days):
+            if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+                raise ValueError("Inactivity periods must be positive whole numbers of days")
 
     @classmethod
     def from_entry(cls, entry: ConfigEntry) -> ControllerSettings:
-        """Read stable connection data and the two adjustable timing options."""
+        """Read stable connection data and adjustable collection/cleanup options."""
         data = dict(entry.data)
-        data.update({key: entry.options[key] for key in ("interval", "timeout") if key in entry.options})
+        option_keys = (
+            "interval",
+            "timeout",
+            "auto_delete_clients",
+            "client_retention_days",
+            "auto_delete_ssids",
+            "ssid_retention_days",
+        )
+        data.update({key: entry.options[key] for key in option_keys if key in entry.options})
         return cls(**data)

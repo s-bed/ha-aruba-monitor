@@ -263,7 +263,7 @@ async def test_device_metadata_and_parent_links_refresh_with_retained_inventory(
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
-async def test_ssid_devices_retire_after_successful_inventory_without_losing_clients(
+async def test_ssid_devices_retained_until_explicit_deletion_without_losing_clients(
     hass, tmp_path, transport
 ):
     from homeassistant.helpers import entity_registry as er
@@ -287,7 +287,13 @@ async def test_ssid_devices_retire_after_successful_inventory_without_losing_cli
     with patch.object(coordinator.client, "collect", return_value=([], [], [])):
         await coordinator.async_refresh()
     await hass.async_block_till_done()
-    assert coordinator.snapshot["ssids"] == []
+    assert all(not ssid["in_inventory"] for ssid in coordinator.snapshot["ssids"])
+    assert devices.async_get(device.id)
+    assert all(entities.async_get(entity.entity_id) for entity in native_entities)
+    assert not coordinator.metrics[f"ssid_{old_ssid['id']}_clients"].available
+    await coordinator.async_mutate("delete_ssid", old_ssid["ssid"])
+    await hass.async_block_till_done()
+    assert old_ssid["id"] not in {ssid["id"] for ssid in coordinator.snapshot["ssids"]}
     assert not devices.async_get(device.id)
     assert all(not entities.async_get(entity.entity_id) for entity in native_entities)
     assert {row["id"] for row in coordinator.snapshot["clients"]} == {row["id"] for row in clients}

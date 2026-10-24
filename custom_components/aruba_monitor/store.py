@@ -251,6 +251,7 @@ class Store:
 
     def _clients(self):
         status = self.status()
+        protected_macs = self._protected_macs()
         result = []
         for device in self.db.execute("SELECT * FROM devices ORDER BY id"):
             aliases = list(
@@ -269,6 +270,7 @@ class Store:
                 )
             ]
             connected = any(alias["last_seen"] == status["last_success"] for alias in aliases)
+            delete_reason = self._client_delete_reason(device["id"], aliases, status)
             result.append(
                 {
                     **payload,
@@ -279,6 +281,9 @@ class Store:
                     "last_seen": latest["last_seen"],
                     "sightings": observations,
                     "connection": ("connected" if connected else "offline") if status["fresh"] else "unknown",
+                    "protected": any(alias["mac"] in protected_macs for alias in aliases),
+                    "delete_allowed": delete_reason is None,
+                    "delete_reason": delete_reason,
                 }
             )
         return result
@@ -324,20 +329,21 @@ class Store:
                         "stale": status["stale"],
                     }
                 )
-            names = {
-                json.loads(row[0])["ssid"]
-                for row in self.db.execute(
-                    "SELECT payload FROM inventory WHERE kind='ssid' AND seen_at=?", (last,)
-                )
-            }
             ssids = []
-            for name in sorted(names):
+            retained = [
+                (json.loads(row["payload"])["ssid"], row)
+                for row in self.db.execute("SELECT * FROM inventory WHERE kind='ssid'")
+            ]
+            for name, row in sorted(retained, key=lambda item: item[0]):
                 clients = [client for client in current if client["ssid"] == name]
                 by_ap, by_band = {}, {}
                 for client in clients:
                     by_ap[client["ap"]] = by_ap.get(client["ap"], 0) + 1
                     band = client.get("band") or "unknown"
                     by_band[band] = by_band.get(band, 0) + 1
+                in_inventory = row["seen_at"] == last
+                detected = self._ssid_detected(name, last)
+                delete_reason = self._ssid_delete_reason(row, status)
                 ssids.append(
                     {
                         "id": ssid_id(name),
@@ -345,11 +351,167 @@ class Store:
                         "clients": len(clients),
                         "by_ap": by_ap,
                         "by_band": by_band,
-                        "in_inventory": True,
+                        "in_inventory": in_inventory,
+                        "last_seen": self._ssid_last_seen(name, row["seen_at"]),
+                        "connection": ("connected" if in_inventory or detected else "offline")
+                        if status["fresh"]
+                        else "unknown",
+                        "delete_allowed": delete_reason is None,
+                        "delete_reason": delete_reason,
                         "stale": status["stale"],
                     }
                 )
             return {"aps": aps, "ssids": ssids, "total_clients": len(current)}
+
+    def _protected_macs(self) -> set[str]:
+        """Store protection on original MACs so identity corrections preserve it."""
+        return set(self._get("protected_client_macs", []))
+
+    @staticmethod
+    def _collection_delete_reason(status: dict) -> str | None:
+        if not status["fresh"] or not status["live_collection"]:
+            return "A fresh successful collection is required before deletion."
+        return None
+
+    def _client_delete_reason(self, device_id: str, aliases: list, status: dict) -> str | None:
+        if reason := self._collection_delete_reason(status):
+            return reason
+        if any(alias["last_seen"] == status["last_success"] for alias in aliases):
+            return "This client is still detected by the controller."
+        if self.db.execute(
+            """SELECT 1 FROM aliases a WHERE a.device_id=? AND (
+                EXISTS (SELECT 1 FROM members m WHERE m.mac=a.mac) OR
+                EXISTS (SELECT 1 FROM evidence e WHERE e.mac=a.mac)) LIMIT 1""",
+            (device_id,),
+        ).fetchone():
+            return "This client is retained by a saved migration campaign."
+        return None
+
+    def _ssid_detected(self, name: str, last_success: str | None) -> bool:
+        return (
+            self.db.execute(
+                "SELECT 1 FROM sightings WHERE ssid=? AND last_seen=? LIMIT 1", (name, last_success)
+            ).fetchone()
+            is not None
+        )
+
+    def _ssid_delete_reason(self, row, status: dict) -> str | None:
+        if reason := self._collection_delete_reason(status):
+            return reason
+        if row["seen_at"] == status["last_success"]:
+            return "This SSID is still reported by the controller."
+        if self._ssid_detected(json.loads(row["payload"])["ssid"], status["last_success"]):
+            return "Clients are still detected on this SSID."
+        return None
+
+    def _ssid_last_seen(self, name: str, inventory_seen: str) -> str:
+        sighting = self.db.execute("SELECT MAX(last_seen) FROM sightings WHERE ssid=?", (name,)).fetchone()[0]
+        retained = self._get("ssid_last_seen", {}).get(ssid_id(name))
+        return max(value for value in (inventory_seen, sighting, retained) if value)
+
+    def protect_client(self, device_id: str, protected: bool):
+        """Change automatic cleanup protection for every MAC in this identity."""
+        if not isinstance(protected, bool):
+            raise ValueError("Client protection must be true or false")
+        with self.lock, self.db:
+            self._device(device_id)
+            macs = {
+                row[0] for row in self.db.execute("SELECT mac FROM aliases WHERE device_id=?", (device_id,))
+            }
+            protected_macs = self._protected_macs()
+            if protected:
+                protected_macs.update(macs)
+            else:
+                protected_macs.difference_update(macs)
+            self._set("protected_client_macs", sorted(protected_macs))
+
+    def _delete_client(self, device_id: str, aliases: list):
+        macs = {alias["mac"] for alias in aliases}
+        # Client history can expire earlier than SSID inventory. Preserve its last
+        # observation so removing that history cannot shorten the SSID's lifetime.
+        ssid_seen = self._get("ssid_last_seen", {})
+        for row in self.db.execute(
+            """SELECT s.ssid,MAX(s.last_seen) AS last_seen FROM sightings s
+            JOIN aliases a ON a.mac=s.mac WHERE a.device_id=? GROUP BY s.ssid""",
+            (device_id,),
+        ):
+            key = ssid_id(row["ssid"])
+            if self.db.execute("SELECT 1 FROM inventory WHERE kind='ssid' AND id=?", (key,)).fetchone():
+                ssid_seen[key] = max(ssid_seen.get(key, row["last_seen"]), row["last_seen"])
+        self._set("ssid_last_seen", ssid_seen)
+        self.db.execute(
+            "DELETE FROM sightings WHERE mac IN (SELECT mac FROM aliases WHERE device_id=?)", (device_id,)
+        )
+        self.db.execute("DELETE FROM aliases WHERE device_id=?", (device_id,))
+        self.db.execute("DELETE FROM devices WHERE id=?", (device_id,))
+        self._set("protected_client_macs", sorted(self._protected_macs() - macs))
+
+    def delete_client(self, device_id: str):
+        """Forget an absent identity and its sightings without changing campaigns."""
+        with self.lock, self.db:
+            self._device(device_id)
+            aliases = list(self.db.execute("SELECT * FROM aliases WHERE device_id=?", (device_id,)))
+            if reason := self._client_delete_reason(device_id, aliases, self.status()):
+                raise ValueError(reason)
+            self._delete_client(device_id, aliases)
+
+    def delete_ssid(self, ssid: str):
+        """Forget only absent SSID inventory; historical sightings remain intact."""
+        with self.lock, self.db:
+            row = self.db.execute(
+                "SELECT * FROM inventory WHERE kind='ssid' AND id=?", (ssid_id(ssid),)
+            ).fetchone()
+            if not row:
+                raise ValueError("SSID not found")
+            status = self.status()
+            if reason := self._ssid_delete_reason(row, status):
+                raise ValueError(reason)
+            self._delete_ssid(row["id"])
+
+    def _delete_ssid(self, identity: str):
+        self.db.execute("DELETE FROM inventory WHERE kind='ssid' AND id=?", (identity,))
+        ssid_seen = self._get("ssid_last_seen", {})
+        ssid_seen.pop(identity, None)
+        self._set("ssid_last_seen", ssid_seen)
+
+    def cleanup(
+        self, client_retention_days: int | None, ssid_retention_days: int | None, at: str | None = None
+    ) -> dict[str, int]:
+        """Expire absent inventory after a successful poll, preserving campaign history."""
+        for days in (client_retention_days, ssid_retention_days):
+            if days is not None and (type(days) is not int or days < 1):
+                raise ValueError("Retention days must be a positive integer or disabled")
+        at = at or utcnow()
+        now = datetime.fromisoformat(at)
+        removed = {"clients": 0, "ssids": 0}
+        with self.lock, self.db:
+            status = self.status(now=at)
+            if self._collection_delete_reason(status):
+                return removed
+            if client_retention_days is not None:
+                protected = self._protected_macs()
+                for device in list(self.db.execute("SELECT id FROM devices")):
+                    aliases = list(
+                        self.db.execute("SELECT * FROM aliases WHERE device_id=?", (device["id"],))
+                    )
+                    if not aliases or any(alias["mac"] in protected for alias in aliases):
+                        continue
+                    if self._client_delete_reason(device["id"], aliases, status):
+                        continue
+                    last_seen = max(datetime.fromisoformat(alias["last_seen"]) for alias in aliases)
+                    if (now - last_seen).total_seconds() / 86400 >= client_retention_days:
+                        self._delete_client(device["id"], aliases)
+                        removed["clients"] += 1
+            if ssid_retention_days is not None:
+                for row in list(self.db.execute("SELECT * FROM inventory WHERE kind='ssid'")):
+                    name = json.loads(row["payload"])["ssid"]
+                    if self._ssid_delete_reason(row, status):
+                        continue
+                    last_seen = datetime.fromisoformat(self._ssid_last_seen(name, row["seen_at"]))
+                    if (now - last_seen).total_seconds() / 86400 >= ssid_retention_days:
+                        self._delete_ssid(row["id"])
+                        removed["ssids"] += 1
+            return removed
 
     def _device(self, device_id):
         if not self.db.execute("SELECT 1 FROM devices WHERE id=?", (device_id,)).fetchone():

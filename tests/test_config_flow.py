@@ -25,6 +25,14 @@ INPUT = {
     "aruba_verify_tls": True,
     "aruba_ca": "",
 }
+DEFAULT_OPTIONS = {
+    "interval": 30.0,
+    "timeout": 15.0,
+    "auto_delete_clients": False,
+    "client_retention_days": 30,
+    "auto_delete_ssids": False,
+    "ssid_retention_days": 30,
+}
 
 
 @pytest.fixture
@@ -49,7 +57,7 @@ async def test_user_flow_authenticates_and_validates_tables(hass, validate_conne
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Aruba home"
     assert result["data"] == INPUT
-    assert result["options"] == {"interval": 30.0, "timeout": 15.0}
+    assert result["options"] == DEFAULT_OPTIONS
     assert result["result"].unique_id == "home"
     validate_connection.assert_awaited_once_with(hass, INPUT)
     await hass.async_block_till_done()
@@ -173,13 +181,95 @@ async def test_options_change_timing_without_changing_identity(hass):
             result["flow_id"], user_input={"interval": 60, "timeout": 7.5}
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {"interval": 60, "timeout": 7.5}
+    assert entry.options == {**DEFAULT_OPTIONS, "interval": 60, "timeout": 7.5}
     assert entry.data == INPUT
     reload.assert_called_once_with(entry.entry_id)
     settings = ControllerSettings.from_entry(entry)
     assert settings.interval == 60
     assert settings.timeout == 7.5
     assert settings.site_id == "home"
+    assert settings.auto_delete_clients is False
+    assert settings.auto_delete_ssids is False
+    assert settings.client_retention_days == 30
+    assert settings.ssid_retention_days == 30
+
+
+async def test_options_save_independent_cleanup_settings_without_changing_identity(hass):
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, unique_id="home")
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    options = {
+        **DEFAULT_OPTIONS,
+        "auto_delete_clients": True,
+        "client_retention_days": 45,
+        "auto_delete_ssids": False,
+        "ssid_retention_days": 7,
+    }
+    with patch.object(hass.config_entries, "async_schedule_reload") as reload:
+        result = await hass.config_entries.options.async_configure(result["flow_id"], user_input=options)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == options
+    assert entry.data == INPUT
+    settings = ControllerSettings.from_entry(entry)
+    assert settings.auto_delete_clients is True
+    assert settings.client_retention_days == 45
+    assert settings.auto_delete_ssids is False
+    assert settings.ssid_retention_days == 7
+    reload.assert_called_once_with(entry.entry_id)
+
+
+async def test_options_form_preserves_saved_cleanup_values(hass):
+    options = {
+        **DEFAULT_OPTIONS,
+        "auto_delete_clients": True,
+        "client_retention_days": 60,
+        "auto_delete_ssids": True,
+        "ssid_retention_days": 90,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT, options=options)
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    fields = {getattr(key, "schema", key): key for key in result["data_schema"].schema}
+    for name, value in options.items():
+        assert fields[name].default() == value
+
+
+@pytest.mark.parametrize("option", ["client_retention_days", "ssid_retention_days"])
+@pytest.mark.parametrize("value", [0, -1, 1.5, 30.0, "30", float("nan"), float("inf")])
+async def test_options_reject_invalid_cleanup_days_without_saving(hass, option, value):
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT)
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={**DEFAULT_OPTIONS, option: value}
+        )
+    assert entry.options == {}
+
+
+@pytest.mark.parametrize("option", ["client_retention_days", "ssid_retention_days"])
+async def test_options_reject_boolean_cleanup_days_without_saving(hass, option):
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT)
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={**DEFAULT_OPTIONS, option: True}
+    )
+    assert result["errors"] == {"base": "invalid_config"}
+    assert entry.options == {}
+
+
+@pytest.mark.parametrize("option", ["auto_delete_clients", "auto_delete_ssids"])
+@pytest.mark.parametrize("value", [0, 1, "true", None])
+async def test_options_reject_non_boolean_cleanup_switches(hass, option, value):
+    entry = MockConfigEntry(domain=DOMAIN, data=INPUT)
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input={**DEFAULT_OPTIONS, option: value}
+        )
+    assert entry.options == {}
 
 
 async def test_options_reject_nan_without_saving(hass):
@@ -229,3 +319,26 @@ def test_options_cannot_override_site_or_connection_settings():
     settings = ControllerSettings.from_entry(entry)
     assert settings.site_id == "home"
     assert settings.aruba_host == "192.0.2.10"
+
+
+@pytest.mark.parametrize("options", [{}, {"interval": 45, "timeout": 10}])
+def test_existing_entries_keep_automatic_cleanup_disabled(options):
+    settings = ControllerSettings.from_entry(MockConfigEntry(domain=DOMAIN, data=INPUT, options=options))
+    assert settings.auto_delete_clients is False
+    assert settings.auto_delete_ssids is False
+    assert settings.client_retention_days == 30
+    assert settings.ssid_retention_days == 30
+
+
+@pytest.mark.parametrize("option", ["client_retention_days", "ssid_retention_days"])
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, 30.0, "30", None, float("nan"), float("inf")])
+def test_settings_require_positive_integer_cleanup_days(option, value):
+    with pytest.raises(ValueError, match="positive whole numbers"):
+        ControllerSettings(**{**INPUT, option: value})
+
+
+@pytest.mark.parametrize("option", ["auto_delete_clients", "auto_delete_ssids"])
+@pytest.mark.parametrize("value", [0, 1, "true", None])
+def test_settings_require_boolean_cleanup_switches(option, value):
+    with pytest.raises(ValueError, match="true or false"):
+        ControllerSettings(**{**INPUT, option: value})

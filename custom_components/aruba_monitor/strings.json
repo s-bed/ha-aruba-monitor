@@ -54,15 +54,20 @@
   "options": {
     "step": {
       "init": {
-        "title": "Collection timing",
+        "title": "Collection and automatic cleanup",
         "data": {
           "interval": "Polling interval (seconds, minimum 5)",
-          "timeout": "HTTP request timeout (seconds)"
-        }
+          "timeout": "HTTP request timeout (seconds)",
+          "auto_delete_clients": "Automatically delete inactive clients",
+          "client_retention_days": "Client inactivity period (days)",
+          "auto_delete_ssids": "Automatically delete inactive SSIDs",
+          "ssid_retention_days": "SSID inactivity period (days)"
+        },
+        "description": "Cleanup is optional and runs after successful collections. Campaign members and protected clients are retained. Deleting an inactive item removes local inventory; deleting a client also removes its retained MAC history."
       }
     },
     "error": {
-      "invalid_config": "Use a polling interval of at least five seconds and a positive HTTP timeout."
+      "invalid_config": "Use a polling interval of at least five seconds, a positive HTTP timeout, and positive whole numbers of days for inactivity periods."
     }
   }
 }

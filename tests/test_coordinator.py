@@ -3,6 +3,7 @@
 import asyncio
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -259,3 +260,42 @@ async def test_shutdown_drains_collection_cancels_timers_and_closes_once(make_co
         await coordinator.async_snapshot()
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         coordinator.store.db.execute("SELECT 1")
+
+
+async def test_automatic_cleanup_only_runs_after_successful_polls(make_coordinator):
+    coordinator = await make_coordinator()
+    coordinator.settings = replace(
+        coordinator.settings,
+        auto_delete_clients=True,
+        client_retention_days=7,
+        auto_delete_ssids=True,
+        ssid_retention_days=45,
+    )
+    await coordinator.async_initialize()
+    with patch.object(coordinator.store, "cleanup", wraps=coordinator.store.cleanup) as cleanup:
+        coordinator.client.collect.side_effect = ArubaError("Controller unavailable")
+        await coordinator.async_refresh()
+        cleanup.assert_not_called()
+        coordinator.client.collect.side_effect = None
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(7, 45)
+        await coordinator.async_prepare_backup()
+        await coordinator.async_refresh()
+        cleanup.assert_called_once()
+
+
+async def test_cleanup_defaults_off_and_categories_can_be_enabled_independently(make_coordinator):
+    coordinator = await make_coordinator()
+    await coordinator.async_initialize()
+    with patch.object(coordinator.store, "cleanup", wraps=coordinator.store.cleanup) as cleanup:
+        await coordinator.async_refresh()
+        cleanup.assert_not_called()
+        coordinator.settings = replace(coordinator.settings, auto_delete_ssids=True)
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(None, 30)
+        cleanup.reset_mock()
+        coordinator.settings = replace(
+            coordinator.settings, auto_delete_ssids=False, auto_delete_clients=True
+        )
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(30, None)

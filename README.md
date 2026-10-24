@@ -26,7 +26,7 @@ Enter the controller hostname/IP (without a URL scheme or port), username, passw
 
 Connection settings include port (default `4343`), an optional explicit Instant AP IPv4 address, TLS verification (enabled by default), and an optional CA certificate file accessible inside Home Assistant. Custom CA paths refer to the HA host/container filesystem, not the computer running your browser. The default HTTPS timeout is 15 seconds.
 
-Setup validates the login and all required controller tables before accepting the entry. Use **Reconfigure** for connection/TLS/credential changes and **Options** for the collection interval (default 30 seconds, minimum 5) and timeout. Invalid credentials during operation start Home Assistant's reauthentication flow.
+Setup validates the login and all required controller tables before accepting the entry. Use **Reconfigure** for connection/TLS/credential changes and **Options** for the collection interval (default 30 seconds, minimum 5), timeout, and automatic cleanup. Client and SSID cleanup have separate switches, both off by default, and separate inactivity periods that default to 30 days. Periods must be positive whole numbers of days. Existing installations retain their history until cleanup is enabled or an administrator deletes an item manually. Invalid credentials during operation start Home Assistant's reauthentication flow.
 
 Do not run two collectors against the same controller during normal use. Monitoring pauses when Home Assistant is stopped or restarted.
 
@@ -34,8 +34,8 @@ Do not run two collectors against the same controller during normal use. Monitor
 
 The **Aruba Monitor** sidebar panel is visible to administrators only. Its authenticated backend also restricts all client/campaign reads and writes to administrators.
 
-- **Clients** opens first: retained device inventory and per-MAC/SSID observation history. Click a client for a two-column details popup on desktop: its Aruba Monitor device on the left, and linked devices plus Home Assistant linking on the right. The layout stacks on smaller screens. Click a device card to open it in Home Assistant. Linked devices appear as cards too. Devices do not age out merely because they are offline.
-- **Network:** APs, reported radios, discovered SSIDs and connection splits. SSIDs come only from the latest successful controller inventory, including networks with no clients. SSIDs no longer reported are automatically retired from HA's devices and entities after a successful poll. Failed polls preserve the inventory. Client sighting history, campaign evidence and historical SSID suggestions in migration forms remain saved. The health footer remains visible while the content scrolls.
+- **Clients** opens first: retained device inventory and per-MAC/SSID observation history. Click a client for a two-column details popup on desktop: its Aruba Monitor device on the left, and linked devices plus Home Assistant linking on the right. The layout stacks on smaller screens. Click a device card to open it in Home Assistant. Linked devices appear as cards too. Inactive clients remain saved unless explicitly deleted or eligible for enabled automatic cleanup.
+- **Network:** APs, reported radios, discovered SSIDs and connection splits. SSIDs originate from successful controller inventories, including networks with no clients. An SSID that is no longer reported stays in the retained inventory until manually deleted or eligible for enabled automatic cleanup; its current statistics are unavailable. Failed polls preserve the inventory. Deleting an SSID removes its local inventory and Aruba Monitor entities, while client sighting history, campaign evidence and historical SSID suggestions in migration forms remain saved. The health footer remains visible while the content scrolls.
 - **Migrations** is last: create campaigns with exact source/target SSIDs; expand each campaign's clients independently. Lists start collapsed and default to **Pending & returned**. Searches, filters and form entry survive automatic refreshes.
 
 The panel follows the active HA theme and refreshes every five seconds while mounted. These reads do not poll the controller. All frontend assets are local.
@@ -51,11 +51,15 @@ Client devices advertise their network MAC to Home Assistant, which automaticall
 
 Client entities retain stable IDs when names, SSIDs or campaign identity links change. They remain registered when clients disconnect. Retained identity groups affect campaign grouping, not individual MAC entities or network connection counts. AP IDs use serial hashes; SSID IDs hash the exact UTF-8 SSID. AP renames preserve entity identities. Missing metrics remain unknown. Client signal is SNR in dB.
 
+An administrator can manually delete an inactive client or SSID after a fresh successful collection confirms its absence. The panel asks for confirmation because deletion is permanent. Deleting a client removes its retained MAC history and Aruba Monitor entities and device association; Home Assistant records owned by other integrations, including their network connections, remain unchanged. A client referenced by membership or evidence in any saved campaign cannot be deleted, and automatic cleanup skips it. Use **Protect from automatic cleanup** in a client's details to retain that client regardless of its inactivity period; protection does not block an explicit manual deletion. Protection is saved per MAC in the existing database metadata without changing the database schema. If a deleted client or SSID is detected again, the integration recreates it as a newly observed item.
+
+Automatic cleanup runs only after a successful collection and deletes absent clients or SSIDs whose last observation is at least their configured inactivity period ago. Controller outages, failed collections and integration startup without a new successful collection never trigger deletion. Protect clients whose historical records you want to retain before enabling client cleanup.
+
 A failed poll immediately marks collection unhealthy, makes client connectivity entities unavailable and panel connectivity unknown, and prevents campaign completion. Native statistics retain their last values until collection is stale after three polling intervals; AP statistics additionally require the AP to be online; client statistics require that MAC to be connected in the last successful collection. Client last-seen timestamps remain available as historical values. A separate timer enforces staleness even during reauthentication. After every integration startup, live connectivity and completion remain blocked until that startup's first successful poll. Historical last-success timestamps remain visible.
 
 ## Campaign rules
 
-Campaigns enroll retained source history and newly observed source MACs while active. Any observation on a different SSID after creation confirms migration, including a non-target SSID. A source observation at or after the latest non-source sighting marks the device returned. Offline status alone never confirms migration, and offline devices never age out.
+Campaigns enroll retained source history and newly observed source MACs while active. Any observation on a different SSID after creation confirms migration, including a non-target SSID. A source observation at or after the latest non-source sighting marks the device returned. Offline status alone never confirms migration. Campaign members never age out, including when automatic client cleanup is enabled.
 
 Exclusions require a note and apply only to their campaign. Migration evidence stays attached to the MAC originally observed. Completed campaigns freeze enrollment/evidence; their exclusions are read-only, while identity corrections can still recalculate saved results.
 
@@ -86,7 +90,7 @@ node --test tests/test_panel.js
 
 CI runs official hassfest validation. Run the local checks above before submitting changes, and test against both HA 2026.10.0 and 2026.10.2 using separate environments. Sanitized real controller fixtures are in `tests/fixtures/instant_8_10_0_16`. Synthetic tests and browser mock data do not establish live controller compatibility.
 
-The panel's administrator-only WebSocket commands are namespaced under `aruba_monitor/`: `snapshot`, `client_devices`, `client_device_link`, `campaign_create`, `campaign_complete`, `campaign_delete`, `campaign_exclude`, `client_label`, `client_link`, and `client_unlink`. Panel commands have no network-configuration side effects.
+The panel's administrator-only WebSocket commands are namespaced under `aruba_monitor/`: `snapshot`, `client_devices`, `client_device_link`, `client_delete`, `client_protect`, `ssid_delete`, `campaign_create`, `campaign_complete`, `campaign_delete`, `campaign_exclude`, `client_label`, `client_link`, and `client_unlink`. Panel commands have no network-configuration side effects.
 
 ## Releases
 

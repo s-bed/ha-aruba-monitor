@@ -264,7 +264,7 @@ async def test_obsolete_radios_removed_only_after_validated_inventory_for_this_e
     assert registry.async_get_entity_id("sensor", DOMAIN, radio_one.unique_id) is not None
 
 
-@pytest.mark.parametrize("kind", ["radio", "ssid"])
+@pytest.mark.parametrize("kind", ["radio", "ssid", "client"])
 async def test_reappearing_metric_waits_for_old_entity_retirement_and_keeps_registry(hass, store, kind):
     import asyncio
 
@@ -285,11 +285,11 @@ async def test_reappearing_metric_waits_for_old_entity_retirement_and_keeps_regi
             added.append(entity)
 
     await async_setup_metrics(hass, entry, add_entities, "sensor", ArubaSensor)
-    key = (
-        f"ap_{ssid_id('SERIAL01')}_radio_0_band"
-        if kind == "radio"
-        else f"ssid_{ssid_id('Old Wi-Fi')}_clients"
-    )
+    key = {
+        "radio": f"ap_{ssid_id('SERIAL01')}_radio_0_band",
+        "ssid": f"ssid_{ssid_id('Old Wi-Fi')}_clients",
+        "client": f"client_{ssid_id('aa:bb:cc:00:00:01')}_ip",
+    }[kind]
     old_radio = next(entity for entity in added if entity.key == key)
     registered = registry.async_update_entity(old_radio.entity_id, name="Preserve this user's name")
     started, release = asyncio.Event(), asyncio.Event()
@@ -316,7 +316,7 @@ async def test_reappearing_metric_waits_for_old_entity_retirement_and_keeps_regi
     assert registry.async_get(replacement).name == "Preserve this user's name"
 
 
-async def test_absent_ssid_metrics_and_devices_retire_only_after_validated_inventory(hass, store, time_at):
+async def test_retained_ssid_metrics_and_devices_retire_only_after_deletion(hass, store, time_at):
     from homeassistant.helpers import device_registry as dr
 
     store.ingest([client()], [ap()], inventory(), time_at(0))
@@ -379,6 +379,14 @@ async def test_absent_ssid_metrics_and_devices_retire_only_after_validated_inven
     coordinator.inventory_revision = 1
     coordinator.listeners[0]()
     await hass.async_block_till_done()
+    assert all(not entity.async_remove.called for entity in old_entities)
+    assert devices.async_get(old_device.id)
+    assert not coordinator.metrics[f"ssid_{ssid_id('Old Wi-Fi')}_clients"].available
+    store.delete_ssid("Old Wi-Fi")
+    coordinator.metrics = build_metrics(store.snapshot(), "home")
+    coordinator.inventory_revision = 2
+    coordinator.listeners[0]()
+    await hass.async_block_till_done()
     assert all(entity.async_remove.await_count == 1 for entity in old_entities)
     assert not entities.async_get(disabled.entity_id)
     assert not devices.async_get(old_device.id)
@@ -393,7 +401,7 @@ async def test_absent_ssid_metrics_and_devices_retire_only_after_validated_inven
     # The stable SSID identifier returns when the controller discovers it again.
     store.ingest([], [ap()], inventory(), time_at(2))
     coordinator.metrics = build_metrics(store.snapshot(), "home")
-    coordinator.inventory_revision = 2
+    coordinator.inventory_revision = 3
     coordinator.listeners[0]()
     await hass.async_block_till_done()
     replacement = devices.async_get_device_by_identifier((DOMAIN, old_prefix), entry.entry_id)

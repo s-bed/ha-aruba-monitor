@@ -1,6 +1,7 @@
 """Exercise per-MAC entities through Home Assistant's native registries."""
 
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -93,6 +94,33 @@ async def test_client_connectivity_enabled_and_other_sensors_disabled_by_default
     assert device.model is None
     parent = devices.async_get_device_by_identifier((DOMAIN, "aruba_home"), entry.entry_id)
     assert device.via_device_id == parent.id
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_auto_cleanup_removes_native_client_entities_and_respects_protection(
+    hass, tmp_path, controller, freezer
+):
+    controller["clients"] = [client(), client(mac=SECOND_MAC)]
+    entry = await setup_entry(hass, tmp_path)
+    coordinator = entry.runtime_data
+    protected = next(c for c in coordinator.snapshot["clients"] if c["macs"] == [MAC])
+    second = registered(hass, SECOND_MAC)
+    entities = er.async_get(hass)
+    second_entities = er.async_entries_for_device(entities, second.device_id, include_disabled_entities=True)
+    await coordinator.async_mutate("protect_client", protected["id"], True)
+    coordinator.settings = replace(coordinator.settings, auto_delete_clients=True)
+    controller["clients"] = []
+    freezer.move_to(datetime.now(UTC) + timedelta(days=31))
+    await refresh(hass, entry)
+    assert [c["macs"] for c in coordinator.snapshot["clients"]] == [[MAC]]
+    assert coordinator.snapshot["clients"][0]["protected"]
+    assert hass.states.get(registered(hass).entity_id).state == STATE_OFF
+    assert all(not entities.async_get(item.entity_id) for item in second_entities)
+    assert not dr.async_get(hass).async_get(second.device_id)
+    controller["clients"] = [client(mac=SECOND_MAC)]
+    await refresh(hass, entry)
+    assert hass.states.get(registered(hass, SECOND_MAC).entity_id).state == STATE_ON
+    assert len(coordinator.snapshot["clients"]) == 2
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 

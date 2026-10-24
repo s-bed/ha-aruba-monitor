@@ -132,6 +132,14 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         await self.hass.async_add_executor_job(self.store.set_meta, "firmware", firmware)
                         self._firmware_read = True
                     await self.hass.async_add_executor_job(self.store.ingest, clients, aps, networks)
+                    if self.settings.auto_delete_clients or self.settings.auto_delete_ssids:
+                        await self.hass.async_add_executor_job(
+                            self.store.cleanup,
+                            self.settings.client_retention_days
+                            if self.settings.auto_delete_clients
+                            else None,
+                            self.settings.ssid_retention_days if self.settings.auto_delete_ssids else None,
+                        )
                     self.inventory_revision += 1
             if self._closed:
                 return self.snapshot
@@ -157,6 +165,8 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._paused or self._closed:
                 raise HomeAssistantError("Aruba Monitor is temporarily unavailable during backup or unload")
             result = await self.hass.async_add_executor_job(getattr(self.store, operation), *args)
+            if operation in {"delete_client", "delete_ssid"}:
+                self.inventory_revision += 1
         await self.async_refresh_status()
         return result
 

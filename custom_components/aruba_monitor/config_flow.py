@@ -14,6 +14,15 @@ from .config import ControllerSettings
 from .const import DOMAIN
 from .parser import ParseError
 
+_OPTION_DEFAULTS = {
+    "interval": 30.0,
+    "timeout": 15.0,
+    "auto_delete_clients": False,
+    "client_retention_days": 30,
+    "auto_delete_ssids": False,
+    "ssid_retention_days": 30,
+}
+
 
 def _connection_schema(defaults: dict[str, Any], *, initial: bool = False) -> probatio.Schema:
     fields: dict[Any, Any] = {}
@@ -92,7 +101,7 @@ class ArubaMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=f"Aruba {user_input['site_id']}",
                     data=user_input,
-                    options={"interval": 30.0, "timeout": 15.0},
+                    options=dict(_OPTION_DEFAULTS),
                 )
         return self.async_show_form(
             step_id="user", data_schema=_connection_schema(user_input or {}, initial=True), errors=errors
@@ -142,7 +151,7 @@ class ArubaMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class ArubaMonitorOptionsFlow(config_entries.OptionsFlowWithReload):
-    """Adjust polling independently from stable connection and identity data."""
+    """Adjust polling and cleanup independently from stable identity data."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         errors = {}
@@ -153,7 +162,7 @@ class ArubaMonitorOptionsFlow(config_entries.OptionsFlowWithReload):
                 errors = {"base": "invalid_config"}
             else:
                 return self.async_create_entry(title="", data=user_input)
-        defaults = {"interval": 30.0, "timeout": 15.0, **self.config_entry.options, **(user_input or {})}
+        defaults = {**_OPTION_DEFAULTS, **self.config_entry.options, **(user_input or {})}
         return self.async_show_form(
             step_id="init",
             data_schema=probatio.Schema(
@@ -164,6 +173,14 @@ class ArubaMonitorOptionsFlow(config_entries.OptionsFlowWithReload):
                     probatio.Required("timeout", default=defaults["timeout"]): probatio.All(
                         probatio.Coerce(float), probatio.Range(min=0, min_included=False)
                     ),
+                    probatio.Required("auto_delete_clients", default=defaults["auto_delete_clients"]): bool,
+                    probatio.Required(
+                        "client_retention_days", default=defaults["client_retention_days"]
+                    ): probatio.All(int, probatio.Range(min=1)),
+                    probatio.Required("auto_delete_ssids", default=defaults["auto_delete_ssids"]): bool,
+                    probatio.Required(
+                        "ssid_retention_days", default=defaults["ssid_retention_days"]
+                    ): probatio.All(int, probatio.Range(min=1)),
                 }
             ),
             errors=errors,

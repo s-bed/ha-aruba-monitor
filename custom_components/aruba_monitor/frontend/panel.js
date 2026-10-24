@@ -17,6 +17,7 @@ class ArubaMonitorPanel extends HTMLElement {
     this.deviceRequest = 0;
     this.deviceOptions = [];
     this.deviceMatches = [];
+    this.clientProtectionWrites = new Map();
     this.activeDeviceOption = -1;
     this.campaignQueries = new Map();
     this.campaignStates = new Map();
@@ -42,12 +43,13 @@ class ArubaMonitorPanel extends HTMLElement {
         <div id="notice" class="notice" role="alert" hidden></div>
         <section id="clients" class="view">
           <div class="section-heading"><h2>Known clients</h2><label class="search-label"><span class="sr-only">Search clients</span><input id="client-search" type="search" placeholder="Search name, MAC, SSID or AP"></label></div>
+          <p class="caption">Automatic cleanup can be configured in the integration options. Protect individual clients from cleanup in their details.</p>
           <div id="clients-table"></div>
         </section>
         <section id="network" class="view" hidden>
           <div id="network-summary" class="stats"></div>
           <div class="section-heading"><h2>Access points</h2></div><div id="ap-list" class="ap-grid"></div>
-          <div class="section-heading"><h2>SSIDs</h2></div><div id="ssid-list"></div>
+          <div class="section-heading"><h2>SSIDs</h2></div><p class="caption">Automatic cleanup can be configured in the integration options.</p><div id="ssid-list"></div>
         </section>
         <section id="migrations" class="view" hidden>
           <div class="section-heading"><h2>Migration campaigns</h2><button id="new-campaign">New campaign</button></div>
@@ -75,7 +77,7 @@ class ArubaMonitorPanel extends HTMLElement {
       </div>`;
     this.shadowRoot.addEventListener("click", event => this.onClick(event));
     this.shadowRoot.addEventListener("input", event => this.onInput(event));
-    this.shadowRoot.addEventListener("change", event => this.onInput(event));
+    this.shadowRoot.addEventListener("change", event => this.onChange(event));
     this.shadowRoot.addEventListener("keydown", event => this.onDevicePickerKey(event));
     this.shadowRoot.addEventListener("focusin", event => {
       if (event.target.id === "ha-device-search") this.renderDeviceOptions();
@@ -148,7 +150,7 @@ class ArubaMonitorPanel extends HTMLElement {
 
   clientRows(clients, campaign = null) {
     return clients.map(client => `<tr>
-      <td>${deviceButton(client)}<small class="mono">${client.macs.map(e).join("<br>")}</small></td>
+      <td>${deviceButton(client)}${client.protected ? '<small>Protected from automatic cleanup</small>' : ""}<small class="mono">${client.macs.map(e).join("<br>")}</small></td>
       <td>${badge(client.connection)}<small title="${e(client.last_seen)}">Seen ${e(stamp(client.last_seen))}</small></td>
       <td>${e(client.ssid)}<small>${e(client.ap)} · ${e(client.ip || "No IP")}</small></td>
       ${campaign ? `<td>${badge(client.migration_state)}<small>${client.first_away_seen ? `Away from source ${e(stamp(client.first_away_seen))}` : "Not seen away from source"}${client.exclusion_note ? `<br>${e(client.exclusion_note)}` : ""}</small></td>
@@ -190,13 +192,13 @@ class ArubaMonitorPanel extends HTMLElement {
   }
 
   renderNetwork() {
-    const ssids = this.data.ssids.filter(ssid => ssid.in_inventory);
-    this.$("#network-summary").innerHTML = stat(this.data.total_clients, "Clients in latest snapshot") + stat(this.data.aps.filter(ap => ap.online).length, "APs in latest snapshot") + stat(ssids.length, "Discovered SSIDs");
+    const ssids = this.data.ssids;
+    this.$("#network-summary").innerHTML = stat(this.data.total_clients, "Clients in latest snapshot") + stat(this.data.aps.filter(ap => ap.online).length, "APs in latest snapshot") + stat(ssids.filter(ssid => ssid.in_inventory).length, "SSIDs in latest snapshot") + stat(ssids.length, "Retained SSIDs");
     this.$("#ap-list").innerHTML = this.data.aps.length ? this.data.aps.map(ap => `<article class="card"><div class="card-head"><h3>${e(ap.name)} ${ap.is_vc ? '<span class="caption">VC</span>' : ""}</h3>${badge(this.data.status.fresh ? ap.online ? "connected" : "offline" : "unknown", this.data.status.fresh ? ap.online ? "Online" : "Offline" : "Unknown")}</div>
       <div class="ap-meta">${e(ap.model || "Unknown model")} · ${e(ap.ip)}<br>Serial ${e(ap.serial)} · ${e(ap.clients ?? "—")} clients<br>Uplink ${e(ap.uplink || "Unknown")} · Mesh ${e(ap.mesh_role || "Unknown")}</div>
       <div class="table-wrap" data-scroll-key="ap-${e(ap.serial)}"><table><thead><tr><th>RADIO</th><th>CHANNEL</th><th>POWER</th><th>UTIL.</th><th>NOISE</th></tr></thead><tbody>${ap.radios.map(radio => `<tr><td>${e(radio.index)}<small>${e(radio.band || "Unknown band")}</small></td><td>${e(radio.channel)}</td><td>${e(radio.power_dbm ?? "—")} dBm</td><td>${e(radio.utilization_pct ?? "—")}%</td><td>${e(radio.noise_floor_dbm ?? "—")} dBm</td></tr>`).join("") || '<tr><td colspan="5">No reported radio data</td></tr>'}</tbody></table></div></article>`).join("") : empty("No AP observations yet", "Check collection status in the footer.");
-    const splits = values => Object.entries(values).map(([name, count]) => `<span>${e(name)}: ${e(count)}</span>`).join("") || '<span>0 clients</span>';
-    this.$("#ssid-list").innerHTML = ssids.length ? `<div class="card table-wrap" data-scroll-key="ssids"><table><thead><tr><th>SSID</th><th>CLIENTS</th><th>BY AP</th><th>BY BAND</th></tr></thead><tbody>${ssids.map(ssid => `<tr><td>${e(ssid.ssid)}<small>In latest inventory</small></td><td>${e(ssid.clients)}</td><td><div class="split">${splits(ssid.by_ap)}</div></td><td><div class="split">${splits(ssid.by_band)}</div></td></tr>`).join("")}</tbody></table></div>` : empty("No SSIDs discovered", "SSIDs reported by the controller appear here, including those with no clients. History remains in client details and migrations.");
+    const splits = values => Object.entries(values || {}).map(([name, count]) => `<span>${e(name)}: ${e(count)}</span>`).join("") || '<span>0 clients</span>';
+    this.$("#ssid-list").innerHTML = ssids.length ? `<div class="card table-wrap" data-scroll-key="ssids"><table><thead><tr><th>SSID</th><th>STATUS / LAST SEEN</th><th>CLIENTS</th><th>BY AP</th><th>BY BAND</th><th>ACTION</th></tr></thead><tbody>${ssids.map(ssid => `<tr><td>${e(ssid.ssid)}<small>${ssid.in_inventory ? "In latest inventory" : "Retained inventory"}</small></td><td>${badge(ssid.connection || (this.data.status.fresh ? ssid.in_inventory ? "connected" : "offline" : "unknown"))}<small title="${e(ssid.last_seen)}">Seen ${e(stamp(ssid.last_seen))}</small></td><td>${e(ssid.clients ?? "—")}</td><td><div class="split">${splits(ssid.by_ap)}</div></td><td><div class="split">${splits(ssid.by_band)}</div></td><td><button class="secondary danger" data-delete-ssid="${e(ssid.ssid)}" ${ssid.delete_allowed === true ? "" : "disabled"}>Delete</button>${ssid.delete_allowed === true ? "" : `<small class="delete-reason">${e(ssid.delete_reason || "Deletion requires a successful, fresh collection.")}</small>`}</td></tr>`).join("")}</tbody></table></div>` : empty("No SSIDs discovered", "SSIDs reported by the controller appear here, including those with no clients. History remains in client details and migrations.");
   }
 
   renderDevice(id, preserveDraft = false) {
@@ -204,10 +206,13 @@ class ArubaMonitorPanel extends HTMLElement {
     const pickerDraft = preserveDraft ? {query: this.$("#ha-device-search")?.value, expanded: this.$("#ha-device-search")?.getAttribute("aria-expanded") === "true"} : undefined;
     const client = this.data.clients.find(item => item.id === id);
     if (!client) { this.$("#device-dialog").close(); this.openDevice = null; return; }
+    const protectionWrite = this.clientProtectionWrites.get(id);
+    const protectedValue = protectionWrite ? protectionWrite.value : client.protected;
     this.openDevice = id;
     this.$("#device-content").innerHTML = `<div class="section-heading"><div><h2>${e(title(client))}</h2><p class="muted">First seen ${e(stamp(client.first_seen))}</p></div><button class="icon-button" data-close="device-dialog" aria-label="Close">×</button></div>
       <div id="device-ha-links" class="device-detail-grid" aria-live="polite"><section class="device-column"><h3>Aruba Monitor device</h3><p class="muted">Loading device…</p></section><section class="device-column device-linking"><h3>Linked devices</h3><p class="muted">Loading devices…</p></section></div>
-      <section class="device-history"><h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div></section><p id="device-error" class="error" role="alert"></p>`;
+      <section class="device-history"><h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div></section>
+      <section class="client-retention"><h3>Inventory cleanup</h3><label class="checkbox-label"><input id="client-protected" type="checkbox" ${protectedValue ? "checked" : ""} ${protectionWrite ? "disabled" : ""} aria-describedby="client-protection-help">Protect from automatic cleanup</label><p id="client-protection-help" class="caption">Retain this client even after the automatic cleanup period. You can still delete it manually when it is no longer detected. Automatic cleanup is configured in the integration options.</p><div class="client-delete"><button class="secondary danger" data-delete-client="${e(client.id)}" ${client.delete_allowed === true ? "" : "disabled"}>Delete client</button><p class="caption delete-reason">${e(client.delete_allowed === true ? "Permanently remove this client and its local observation history." : client.delete_reason || "Deletion requires a successful, fresh collection.")}</p></div></section><p id="device-error" class="error" role="alert"></p>`;
     return this.loadDeviceLinks(id, selectedDevice, pickerDraft);
   }
 
@@ -393,6 +398,34 @@ class ArubaMonitorPanel extends HTMLElement {
         button.disabled = true;
         try { await this.loadDeviceLinks(this.openDevice); }
         finally { button.disabled = false; }
+      } else if (button.dataset.deleteClient) {
+        const id = button.dataset.deleteClient;
+        const client = this.data.clients.find(item => item.id === id);
+        if (!client || client.delete_allowed !== true) return;
+        if (!window.confirm(`Delete client “${title(client)}”?\n\nThis permanently removes its local client observation history and Aruba Monitor devices and entities. Devices from other integrations are untouched. If detected again, this client will be discovered again.`)) return;
+        button.disabled = true;
+        const generation = this.generation;
+        try {
+          await this.command("client_delete", {device_id: id});
+          if (this.mounted && generation === this.generation && this.openDevice === id) {
+            this.deviceRequest += 1;
+            this.openDevice = null;
+            this.$("#device-dialog").close();
+          }
+          await this.refresh(true);
+        } catch (error) {
+          if (this.mounted && generation === this.generation && this.openDevice === id && this.$("#device-dialog").open) throw error;
+        } finally { button.disabled = false; }
+      } else if (button.dataset.deleteSsid !== undefined) {
+        const ssid = button.dataset.deleteSsid;
+        const network = this.data.ssids.find(item => item.ssid === ssid);
+        if (!network || network.delete_allowed !== true) return;
+        if (!window.confirm(`Delete SSID “${ssid}”?\n\nThis permanently removes it from the local network inventory. Client observation history and migration campaigns are retained. It will appear again if detected.`)) return;
+        button.disabled = true;
+        try {
+          await this.command("ssid_delete", {ssid});
+          await this.refresh(true);
+        } finally { button.disabled = false; }
       } else if (button.dataset.deleteCampaign) {
         const id = button.dataset.deleteCampaign;
         const campaign = this.data.campaigns.find(item => item.id === id);
@@ -434,6 +467,45 @@ class ArubaMonitorPanel extends HTMLElement {
     if (!id || !details.isConnected) return;
     if (details.open) this.expandedCampaigns.add(id);
     else this.expandedCampaigns.delete(id);
+  }
+
+  async onChange(event) {
+    if (event.target.id !== "client-protected") {
+      this.onInput(event);
+      return;
+    }
+    const input = event.target;
+    const id = this.openDevice;
+    const client = this.data?.clients.find(item => item.id === id);
+    if (!client || input.disabled || this.clientProtectionWrites.has(id)) return;
+    const previous = Boolean(client.protected);
+    const protectedValue = input.checked;
+    const write = {value: protectedValue};
+    this.clientProtectionWrites.set(id, write);
+    let savedValue = previous;
+    const generation = this.generation;
+    const current = () => this.mounted && generation === this.generation && this.openDevice === id && this.$("#device-dialog").open;
+    input.disabled = true;
+    this.$("#device-error").textContent = "";
+    try {
+      await this.command("client_protect", {device_id: id, protected: protectedValue});
+      client.protected = protectedValue;
+      const latest = this.data?.clients.find(item => item.id === id);
+      if (latest) latest.protected = protectedValue;
+      savedValue = protectedValue;
+      await this.refresh(true);
+    } catch (error) {
+      input.checked = previous;
+      if (current()) this.$("#device-error").textContent = error.message || "Could not change cleanup protection";
+    } finally {
+      this.clientProtectionWrites.delete(id);
+      input.disabled = false;
+      if (current()) {
+        const checkbox = this.$("#client-protected");
+        checkbox.checked = savedValue;
+        checkbox.disabled = false;
+      }
+    }
   }
 
   onInput(event) {
