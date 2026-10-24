@@ -34,7 +34,7 @@ Do not run two collectors against the same controller during normal use. Monitor
 
 The **Aruba Monitor** sidebar panel is visible to administrators only. Its authenticated backend also restricts all client/campaign reads and writes to administrators.
 
-- **Clients** opens first: retained device inventory, labels, explicitly linked MAC identities and per-MAC/SSID observation history. Click a client to open its details, follow **Open device** to its Home Assistant device, or view and open linked Home Assistant devices matched by MAC address. Grouped clients show the devices for each linked MAC. Devices do not age out merely because they are offline.
+- **Clients** opens first: retained device inventory, explicitly linked MAC identities and per-MAC/SSID observation history. Click a client for a wider, two-column details popup on desktop, with a stacked layout on smaller screens. Click a device card to open it in Home Assistant. Linked devices appear as cards too. Grouped clients show the devices for each linked MAC. Devices do not age out merely because they are offline.
 - **Network:** APs, reported radios, SSID counts and connection splits. The health footer remains visible while the content scrolls.
 - **Migrations** is last: create campaigns with exact source/target SSIDs; expand each campaign's clients independently. Lists start collapsed and default to **Pending & returned**. Searches, filters and form entry survive automatic refreshes.
 
@@ -47,7 +47,7 @@ The integration provides native entities for:
 - SSID client totals and splits by AP and by 2.4/5/6 GHz or unknown band.
 - A **Wi-Fi connected** binary sensor for every observed client MAC, enabled by default. Optional IP address, SSID, access point, band, channel, signal-to-noise ratio, link speed and last-seen sensors are disabled by default; enable them from the device’s entity list.
 
-Client devices advertise their network MAC to Home Assistant, which automatically links them to devices from other integrations exposing the same MAC, including devices discovered later. Home Assistant retains each integration’s device record and metadata. Matching uses the exact MAC, never a hostname; devices with randomized or different interface MACs require separate identities.
+Client devices advertise their network MAC to Home Assistant, which automatically links them to devices from other integrations exposing the same MAC, including devices discovered later. Home Assistant retains each integration’s device record and metadata. In the popup, choose a device under **Link a Home Assistant device** and select **Link device** to associate it manually. This adds the client’s observed MAC addresses to that device’s network connections, making the link visible in HA as well as Aruba Monitor; it does not move entities or merge registry records. Conflicting MAC ownership within the selected device’s integration is rejected. The unused device-label input is removed; existing saved labels remain in history. Automatic matching uses the exact MAC, never a hostname; devices with randomized or different interface MACs require separate identities.
 
 Client entities retain stable IDs when names, SSIDs or campaign identity links change. They remain registered when clients disconnect. Linking identities in the panel changes campaign grouping, not individual MAC entities or network connection counts. AP IDs use serial hashes; SSID IDs hash the exact UTF-8 SSID. AP renames preserve entity identities. Missing metrics remain unknown. Client signal is SNR in dB.
 
@@ -86,7 +86,7 @@ node --test tests/test_panel.js
 
 CI runs official hassfest validation. Run the local checks above before submitting changes, and test against both HA 2026.10.0 and 2026.10.2 using separate environments. Sanitized real controller fixtures are in `tests/fixtures/instant_8_10_0_16`. Synthetic tests and browser mock data do not establish live controller compatibility.
 
-The panel's administrator-only WebSocket commands are namespaced under `aruba_monitor/`: `snapshot`, `client_devices`, `campaign_create`, `campaign_complete`, `campaign_delete`, `campaign_exclude`, `client_label`, `client_link`, and `client_unlink`. Panel commands have no network-configuration side effects.
+The panel's administrator-only WebSocket commands are namespaced under `aruba_monitor/`: `snapshot`, `client_devices`, `client_device_link`, `campaign_create`, `campaign_complete`, `campaign_delete`, `campaign_exclude`, `client_label`, `client_link`, and `client_unlink`. Panel commands have no network-configuration side effects.
 
 ## Releases
 
@@ -99,3 +99,11 @@ Each release is named **latest**, has a permanent version tag such as `v0.2.1`, 
 Each release includes `aruba_monitor.zip`. Extract it into `<HA config>/custom_components` to install its `aruba_monitor` folder, then restart Home Assistant. HACS installs directly from the integration directory in the selected version.
 
 The workflows use GitHub's built-in token. Repository rules must allow the release workflow to push its version commit to `main`, create version tags and update `latest`. The separate hassfest workflow validates pushes and pull requests.
+
+### PR test builds
+
+The **PR preview** workflow creates a prerelease named **PR #N preview**, with a rolling `pr-N` tag and `aruba_monitor.zip`, when a pull request targeting `main` is opened or reopened. New commits replace that PR's ZIP with the current integration files. The release notes identify the exact source commit, and the packaged manifest has a distinct development version. Stable releases and `latest` remain unchanged.
+
+Download the ZIP from the PR's prerelease, extract its `aruba_monitor` folder into `<HA config>/custom_components`, and restart Home Assistant. Download the ZIP again after a new commit to test the updated preview. The prerelease's source archive includes trusted main files outside the integration; use the attached integration ZIP for testing.
+
+The workflow must first be merged into `main` before GitHub activates it. After that, **Actions → PR preview → Run workflow**, with an open PR number, can create or refresh a preview for a PR that was already open. Only trusted publishing code runs with release permissions; PR integration files are packaged without executing their code.

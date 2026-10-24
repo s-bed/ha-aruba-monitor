@@ -147,6 +147,9 @@ async def test_client_devices_read_native_and_normalized_mac_links_from_cache(
         "linked_devices": [
             {"id": foreign.id, "name": "<Kitchen speaker>", "macs": retained["macs"], "integration": "test"}
         ],
+        "device_options": [
+            {"id": foreign.id, "name": "<Kitchen speaker>", "macs": retained["macs"], "integration": "test"}
+        ],
     }
     collect.assert_not_awaited()
     snapshot.assert_not_awaited()
@@ -194,7 +197,8 @@ async def test_client_devices_grouped_macs_keep_native_records_and_deduplicate_s
             "integration": "test",
         }
     ]
-    assert unrelated.id not in str(result)
+    assert unrelated.id not in {device["id"] for device in result["linked_devices"]}
+    assert {device["id"] for device in result["device_options"]} == {foreign.id, unrelated.id}
 
 
 async def test_client_devices_missing_native_record_still_resolves_exact_foreign_mac(
@@ -207,6 +211,7 @@ async def test_client_devices_missing_native_record_still_resolves_exact_foreign
     assert await successful(client, "client_devices", device_id=retained["id"]) == {
         "devices": [],
         "linked_devices": [],
+        "device_options": [],
     }
     foreign_entry = MockConfigEntry(domain="test")
     foreign_entry.add_to_hass(hass)
@@ -222,10 +227,177 @@ async def test_client_devices_missing_native_record_still_resolves_exact_foreign
         "linked_devices": [
             {"id": foreign.id, "name": retained["macs"][0], "macs": retained["macs"], "integration": "test"}
         ],
+        "device_options": [
+            {"id": foreign.id, "name": retained["macs"][0], "macs": retained["macs"], "integration": "test"}
+        ],
     }
     response = await command(client, "client_devices", device_id="missing")
     assert response["success"] is False
     assert response["error"] == {"code": "invalid_operation", "message": "Unknown client"}
+
+
+async def test_manual_client_device_link_adds_grouped_macs_without_changing_other_metadata(
+    hass, hass_ws_client, monitor
+):
+    client = await hass_ws_client(hass)
+    coordinator = monitor.runtime_data
+    retained, second = coordinator.snapshot["clients"][:2]
+    await successful(client, "client_link", device_id=retained["id"], mac=second["macs"][0])
+    grouped = next(c for c in coordinator.snapshot["clients"] if c["id"] == retained["id"])
+    # Retained client MACs are canonical in storage; tolerate uppercase in cached inputs.
+    grouped["macs"] = [value.upper() for value in grouped["macs"]]
+    connections = {(dr.CONNECTION_NETWORK_MAC, value.lower()) for value in grouped["macs"]}
+    registry = dr.async_get(hass)
+    foreign_entry = MockConfigEntry(domain="test", data={"password": "private-setting"})
+    foreign_entry.add_to_hass(hass)
+    target = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "speaker-serial")},
+        connections={("bluetooth", "01:02:03:04:05:06")},
+        name="Speaker",
+        manufacturer="Manufacturer",
+        model="Model",
+        serial_number="serial-123",
+        sw_version="1.0",
+    )
+    target = registry.async_update_device(target.id, name_by_user="Kitchen speaker")
+    original = target.dict_repr
+    native = [client_device(hass, monitor, value.lower()) for value in grouped["macs"]]
+    with patch.object(coordinator.client, "collect", new_callable=AsyncMock) as collect:
+        result = await successful(
+            client, "client_device_link", device_id=retained["id"], target_device_id=target.id
+        )
+    updated = registry.async_get(target.id)
+    assert updated.connections == target.connections | connections
+    assert {
+        key: value for key, value in updated.dict_repr.items() if key not in {"connections", "modified_at"}
+    } == {key: value for key, value in original.items() if key not in {"connections", "modified_at"}}
+    assert result["linked_devices"] == [
+        {
+            "id": target.id,
+            "name": "Kitchen speaker",
+            "macs": sorted(value.lower() for value in grouped["macs"]),
+            "integration": "test",
+        }
+    ]
+    assert result["device_options"] == result["linked_devices"]
+    for connection in connections:
+        assert target.id in {device.id for device in registry.async_get_devices(connections={connection})}
+    assert all(registry.async_get(device.id) is device for device in native)
+    assert "private-setting" not in str(result)
+    collect.assert_not_awaited()
+    with patch.object(registry, "async_update_device", wraps=registry.async_update_device) as update:
+        assert (
+            await successful(
+                client, "client_device_link", device_id=retained["id"], target_device_id=target.id
+            )
+            == result
+        )
+    update.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid", ["unknown-client", "unknown-target", "aruba-target", "child-target"])
+async def test_manual_client_device_link_rejects_invalid_selections(hass, hass_ws_client, monitor, invalid):
+    client = await hass_ws_client(hass)
+    retained = monitor.runtime_data.snapshot["clients"][0]
+    registry = dr.async_get(hass)
+    foreign_entry = MockConfigEntry(domain="test")
+    foreign_entry.add_to_hass(hass)
+    target = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "speaker-serial")},
+        name="Speaker",
+    )
+    child = registry.async_get_or_create_child(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "child")},
+        parent_device_id=target.id,
+        name="Child device",
+    )
+    choices = await successful(client, "client_devices", device_id=retained["id"])
+    assert [device["id"] for device in choices["device_options"]] == [target.id]
+    device_id = "missing" if invalid == "unknown-client" else retained["id"]
+    target_id = {
+        "unknown-client": target.id,
+        "unknown-target": "missing",
+        "aruba-target": client_device(hass, monitor, retained["macs"][0]).id,
+        "child-target": child.id,
+    }[invalid]
+    with patch.object(registry, "async_update_device", wraps=registry.async_update_device) as update:
+        result = await command(client, "client_device_link", device_id=device_id, target_device_id=target_id)
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_operation"
+    update.assert_not_called()
+    assert registry.async_get(target.id) is target
+
+
+async def test_manual_client_device_link_rejects_same_owner_mac_collision_without_merging(
+    hass, hass_ws_client, monitor
+):
+    client = await hass_ws_client(hass)
+    retained = monitor.runtime_data.snapshot["clients"][0]
+    registry = dr.async_get(hass)
+    foreign_entry = MockConfigEntry(domain="test")
+    foreign_entry.add_to_hass(hass)
+    target = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id, identifiers={("test", "target")}, name="Target"
+    )
+    existing = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "existing")},
+        connections={(dr.CONNECTION_NETWORK_MAC, retained["macs"][0].upper())},
+        name="Existing",
+    )
+    with patch.object(registry, "async_update_device", wraps=registry.async_update_device) as update:
+        result = await command(
+            client, "client_device_link", device_id=retained["id"], target_device_id=target.id
+        )
+    assert result["success"] is False
+    assert result["error"] == {
+        "code": "invalid_operation",
+        "message": "Another device in that integration already uses an observed MAC address",
+    }
+    update.assert_not_called()
+    assert registry.async_get(target.id) is target
+    assert registry.async_get(existing.id) is existing
+
+
+@pytest.mark.parametrize("flag", ["_paused", "_closed"])
+async def test_manual_client_device_link_blocks_writes_during_backup_or_unload(
+    hass, hass_ws_client, monitor, flag
+):
+    client = await hass_ws_client(hass)
+    coordinator = monitor.runtime_data
+    retained = coordinator.snapshot["clients"][0]
+    registry = dr.async_get(hass)
+    setattr(coordinator, flag, True)
+    try:
+        with patch.object(registry, "async_update_device", wraps=registry.async_update_device) as update:
+            result = await command(
+                client, "client_device_link", device_id=retained["id"], target_device_id="any-device"
+            )
+        assert result["success"] is False
+        assert result["error"]["code"] == "unavailable"
+        update.assert_not_called()
+    finally:
+        setattr(coordinator, flag, False)
+
+
+@pytest.mark.parametrize("invalid_macs", [[], ["invalid"], [None]])
+async def test_manual_client_device_link_validates_cached_macs_before_mutation(
+    hass, hass_ws_client, monitor, invalid_macs
+):
+    client = await hass_ws_client(hass)
+    retained = monitor.runtime_data.snapshot["clients"][0]
+    retained["macs"] = invalid_macs
+    registry = dr.async_get(hass)
+    with patch.object(registry, "async_update_device", wraps=registry.async_update_device) as update:
+        result = await command(
+            client, "client_device_link", device_id=retained["id"], target_device_id="any-device"
+        )
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_operation"
+    update.assert_not_called()
 
 
 async def test_panel_hidden_from_nonadmin_frontend_listing(
