@@ -104,19 +104,19 @@ def test_client_metrics_keep_per_mac_identity_and_evidence_through_panel_linking
     assert before.keys() == linked.keys()
     for mac, connected in ((first, False), (second, True)):
         key = f"client_{ssid_id(mac)}"
-        assert linked[f"{key}_online"].value is connected
-        assert linked[f"{key}_online"].available
-        assert linked[f"{key}_online"].device["connections"] == {("mac", mac)}
-        assert linked[f"{key}_online"].device["identifiers"] == {(DOMAIN, f"aruba_home_{key}")}
-        assert linked[f"{key}_online"].device["name"] == "Living room device"
+        assert linked[f"{key}_tracker"].value is connected
+        assert linked[f"{key}_tracker"].available
+        assert linked[f"{key}_tracker"].device["connections"] == {("mac", mac)}
+        assert linked[f"{key}_tracker"].device["identifiers"] == {(DOMAIN, f"aruba_home_{key}")}
+        assert linked[f"{key}_tracker"].device["name"] == "Living room device"
         assert linked[f"{key}_ssid"].value == ("New Wi-Fi" if connected else "Old Wi-Fi")
         assert linked[f"{key}_ssid"].available is connected
         assert linked[f"{key}_last_seen"].available
-        assert linked[f"{key}_online"].enabled_by_default
+        assert not linked[f"{key}_tracker"].enabled_by_default
         assert all(
             not metric.enabled_by_default
             for name, metric in linked.items()
-            if name.startswith(f"{key}_") and name != f"{key}_online"
+            if name.startswith(f"{key}_") and name != f"{key}_tracker"
         )
     store.unlink(identity["id"], second)
     assert build_metrics(store.snapshot(), "home").keys() == before.keys()
@@ -128,8 +128,8 @@ def test_client_unknown_metrics_units_and_failure_availability(store):
     snapshot = store.snapshot()
     metrics = build_metrics(snapshot, "home")
     key = f"client_{ssid_id(mac)}"
-    assert metrics[f"{key}_online"].device["name"] == f"Wi-Fi client {mac}"
-    assert "manufacturer" not in metrics[f"{key}_online"].device
+    assert metrics[f"{key}_tracker"].device["name"] == f"Wi-Fi client {mac}"
+    assert "manufacturer" not in metrics[f"{key}_tracker"].device
     for field in ("signal_db", "speed_mbps", "band", "channel"):
         assert metrics[f"{key}_{field}"].value is None
     assert metrics[f"{key}_signal_db"].unit == "dB"
@@ -138,8 +138,10 @@ def test_client_unknown_metrics_units_and_failure_availability(store):
     assert metrics[f"{key}_speed_mbps"].device_class == "data_rate"
     snapshot["status"].update(fresh=False, last_error="Controller unavailable")
     grace = build_metrics(snapshot, "home")
-    assert not grace[f"{key}_online"].available
-    assert grace[f"{key}_online"].value is None
+    assert grace[f"{key}_tracker"].available
+    assert grace[f"{key}_tracker"].value is True
+    snapshot["status"]["tracker_available"] = False
+    assert not build_metrics(snapshot, "home")[f"{key}_tracker"].available
     assert grace[f"{key}_signal_db"].available
     snapshot["status"]["stale"] = True
     stale = build_metrics(snapshot, "home")
@@ -174,7 +176,7 @@ def test_collection_error_grace_and_stale_deadline_have_distinct_availability(st
     assert all(
         not metric.available
         for key, metric in stale.items()
-        if key not in {"collection_health", "last_success"} and not key.endswith("_last_seen")
+        if key not in {"collection_health", "last_success"} and not key.endswith(("_last_seen", "_tracker"))
     )
     assert stale["cluster_clients"].value == grace["cluster_clients"].value
 
@@ -264,7 +266,7 @@ async def test_obsolete_radios_removed_only_after_validated_inventory_for_this_e
     assert registry.async_get_entity_id("sensor", DOMAIN, radio_one.unique_id) is not None
 
 
-@pytest.mark.parametrize("kind", ["radio", "ssid"])
+@pytest.mark.parametrize("kind", ["radio", "ssid", "client"])
 async def test_reappearing_metric_waits_for_old_entity_retirement_and_keeps_registry(hass, store, kind):
     import asyncio
 
@@ -285,11 +287,11 @@ async def test_reappearing_metric_waits_for_old_entity_retirement_and_keeps_regi
             added.append(entity)
 
     await async_setup_metrics(hass, entry, add_entities, "sensor", ArubaSensor)
-    key = (
-        f"ap_{ssid_id('SERIAL01')}_radio_0_band"
-        if kind == "radio"
-        else f"ssid_{ssid_id('Old Wi-Fi')}_clients"
-    )
+    key = {
+        "radio": f"ap_{ssid_id('SERIAL01')}_radio_0_band",
+        "ssid": f"ssid_{ssid_id('Old Wi-Fi')}_clients",
+        "client": f"client_{ssid_id('aa:bb:cc:00:00:01')}_ip",
+    }[kind]
     old_radio = next(entity for entity in added if entity.key == key)
     registered = registry.async_update_entity(old_radio.entity_id, name="Preserve this user's name")
     started, release = asyncio.Event(), asyncio.Event()
@@ -316,7 +318,7 @@ async def test_reappearing_metric_waits_for_old_entity_retirement_and_keeps_regi
     assert registry.async_get(replacement).name == "Preserve this user's name"
 
 
-async def test_absent_ssid_metrics_and_devices_retire_only_after_validated_inventory(hass, store, time_at):
+async def test_retained_ssid_metrics_and_devices_retire_only_after_deletion(hass, store, time_at):
     from homeassistant.helpers import device_registry as dr
 
     store.ingest([client()], [ap()], inventory(), time_at(0))
@@ -379,6 +381,14 @@ async def test_absent_ssid_metrics_and_devices_retire_only_after_validated_inven
     coordinator.inventory_revision = 1
     coordinator.listeners[0]()
     await hass.async_block_till_done()
+    assert all(not entity.async_remove.called for entity in old_entities)
+    assert devices.async_get(old_device.id)
+    assert not coordinator.metrics[f"ssid_{ssid_id('Old Wi-Fi')}_clients"].available
+    store.delete_ssid("Old Wi-Fi")
+    coordinator.metrics = build_metrics(store.snapshot(), "home")
+    coordinator.inventory_revision = 2
+    coordinator.listeners[0]()
+    await hass.async_block_till_done()
     assert all(entity.async_remove.await_count == 1 for entity in old_entities)
     assert not entities.async_get(disabled.entity_id)
     assert not devices.async_get(old_device.id)
@@ -393,7 +403,7 @@ async def test_absent_ssid_metrics_and_devices_retire_only_after_validated_inven
     # The stable SSID identifier returns when the controller discovers it again.
     store.ingest([], [ap()], inventory(), time_at(2))
     coordinator.metrics = build_metrics(store.snapshot(), "home")
-    coordinator.inventory_revision = 2
+    coordinator.inventory_revision = 3
     coordinator.listeners[0]()
     await hass.async_block_till_done()
     replacement = devices.async_get_device_by_identifier((DOMAIN, old_prefix), entry.entry_id)

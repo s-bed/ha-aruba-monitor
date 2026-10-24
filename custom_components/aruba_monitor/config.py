@@ -26,6 +26,11 @@ class ControllerSettings:
     aruba_ca: str = ""
     interval: float = 30
     timeout: float = 15
+    auto_delete_clients: bool = True
+    track_new_devices: bool = False
+    client_retention_days: int = 30
+    auto_delete_ssids: bool = False
+    ssid_retention_days: int = 30
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", self.site_id):
@@ -46,16 +51,36 @@ class ControllerSettings:
             raise ValueError("Controller credentials are required")
         if isinstance(self.aruba_port, bool) or not 1 <= self.aruba_port <= 65535:
             raise ValueError("Controller port must be between 1 and 65535")
-        if not math.isfinite(self.interval) or self.interval < 5:
-            raise ValueError("Polling interval must be at least five seconds")
+        if (
+            isinstance(self.interval, bool)
+            or not isinstance(self.interval, (int, float))
+            or not math.isfinite(self.interval)
+            or not 10 <= self.interval <= 300
+        ):
+            raise ValueError("Polling interval must be between 10 and 300 seconds")
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ValueError("HTTP timeout must be positive")
         if not isinstance(self.aruba_verify_tls, bool):
             raise ValueError("TLS verification must be true or false")
+        for enabled in (self.auto_delete_clients, self.auto_delete_ssids, self.track_new_devices):
+            if not isinstance(enabled, bool):
+                raise ValueError("Tracking and automatic cleanup must be true or false")
+        for days in (self.client_retention_days, self.ssid_retention_days):
+            if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+                raise ValueError("Inactivity periods must be positive whole numbers of days")
 
     @classmethod
     def from_entry(cls, entry: ConfigEntry) -> ControllerSettings:
-        """Read stable connection data and the two adjustable timing options."""
+        """Read stable connection data and adjustable collection/cleanup options."""
         data = dict(entry.data)
-        data.update({key: entry.options[key] for key in ("interval", "timeout") if key in entry.options})
+        option_keys = (
+            "interval",
+            "timeout",
+            "auto_delete_clients",
+            "track_new_devices",
+            "client_retention_days",
+            "auto_delete_ssids",
+            "ssid_retention_days",
+        )
+        data.update({key: entry.options[key] for key in option_keys if key in entry.options})
         return cls(**data)

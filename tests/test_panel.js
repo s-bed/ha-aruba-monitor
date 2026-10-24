@@ -628,7 +628,7 @@ test("device search drafts and results survive refresh and redrawing details", a
   assert.equal(panel.$("#ha-device-results").innerHTML, results);
 });
 
-test("network shows only discovered SSIDs including zero-client networks", () => {
+test("network includes retained SSIDs and distinguishes latest from retained counts", () => {
   const {panel} = setup();
   panel.data.ssids = [
     {ssid: "Current", in_inventory: true, clients: 1, by_ap: {Office: 1}, by_band: {"5 GHz": 1}},
@@ -639,8 +639,9 @@ test("network shows only discovered SSIDs including zero-client networks", () =>
   const html = panel.$("#ssid-list").innerHTML;
   assert.match(html, /Current/);
   assert.match(html, /Empty guest/);
-  assert.doesNotMatch(html, /Historical/);
-  assert.match(panel.$("#network-summary").innerHTML, /<strong>2<\/strong><span>Discovered SSIDs/);
+  assert.match(html, /Historical<small>Retained inventory/);
+  assert.match(panel.$("#network-summary").innerHTML, /<strong>2<\/strong><span>SSIDs in latest snapshot/);
+  assert.match(panel.$("#network-summary").innerHTML, /<strong>3<\/strong><span>Retained SSIDs/);
   panel.data.ssids = [];
   panel.renderNetwork();
   assert.match(panel.$("#ssid-list").innerHTML, /No SSIDs discovered/);
@@ -654,3 +655,230 @@ test("migration SSID suggestions retain history without adding it to Network", (
   assert.match(panel.$("#ssid-options").innerHTML, /value="Old"|value="New"/);
   assert.doesNotMatch(panel.$("#ssid-list").innerHTML, /Old &lt;Wi-Fi&gt;/);
 });
+
+function retainedClient(panel, protectedValue = false) {
+  const client = panel.data.clients[0];
+  Object.assign(client, {protected: protectedValue, delete_allowed: true, delete_reason: ""});
+  panel.openDevice = client.id;
+  panel.$("#device-dialog").open = true;
+  panel.$("#client-search").value = "Saved search";
+  panel.$("#device-dialog").scrollTop = 123;
+  return client;
+}
+
+test("client details expose protection and explain deletion blockers with escaped content", async () => {
+  const {panel} = setup();
+  const client = retainedClient(panel, true);
+  client.delete_allowed = false;
+  client.delete_reason = 'Referenced by campaign <Rotation> & "more"';
+  panel._hass.callWS = async () => haDevices();
+  await panel.renderDevice(client.id);
+  const html = panel.$("#device-content").innerHTML;
+  assert.match(html, /id="client-protected" type="checkbox" checked/);
+  assert.match(html, /Protect from automatic cleanup/);
+  assert.match(html, /Retain this client even after the automatic cleanup period/);
+  assert.match(html, /Clients with enabled Presence trackers are also retained automatically/);
+  assert.match(html, /data-delete-client="device-0" disabled/);
+  assert.match(html, /Referenced by campaign &lt;Rotation&gt; &amp; &quot;more&quot;/);
+  assert.doesNotMatch(html, /campaign <Rotation>/);
+  panel.$("#client-search").value = "";
+  panel.renderClients();
+  assert.match(panel.$("#clients-table").innerHTML, /Protected from automatic cleanup/);
+});
+
+for (const protectedValue of [true, false]) {
+  test(`client protection can be ${protectedValue ? "enabled" : "disabled"} without resetting dialog drafts`, async () => {
+    const {panel, calls} = setup();
+    const client = retainedClient(panel, !protectedValue);
+    panel.$("#ha-device-target").value = "target-device";
+    panel.refresh = async force => calls.push(["refresh", force]);
+    const input = {id: "client-protected", checked: protectedValue, disabled: false};
+    await panel.onChange({target: input, type: "change"});
+    assert.deepEqual(calls, [["ws", {type: "aruba_monitor/client_protect", device_id: client.id, protected: protectedValue}], ["refresh", true]]);
+    assert.equal(client.protected, protectedValue);
+    assert.equal(input.checked, protectedValue);
+    assert.equal(input.disabled, false);
+    assert.equal(panel.$("#device-dialog").open, true);
+    assert.equal(panel.$("#device-dialog").scrollTop, 123);
+    assert.equal(panel.$("#ha-device-target").value, "target-device");
+  });
+}
+
+test("failed protection change restores the saved value and leaves the popup open", async () => {
+  const {panel} = setup();
+  retainedClient(panel, true);
+  panel._hass.callWS = async () => { throw new Error("Cleanup protection could not be saved"); };
+  const input = {id: "client-protected", checked: false, disabled: false};
+  await panel.onChange({target: input, type: "change"});
+  assert.equal(input.checked, true);
+  assert.equal(input.disabled, false);
+  assert.equal(panel.$("#device-dialog").open, true);
+  assert.match(panel.$("#device-error").textContent, /could not be saved/);
+  assert.equal(panel.$("#client-search").value, "Saved search");
+});
+
+test("late protection errors do not overwrite another client's popup", async () => {
+  const {panel} = setup();
+  retainedClient(panel);
+  let reject;
+  panel._hass.callWS = () => new Promise((_resolve, fail) => { reject = fail; });
+  const input = {id: "client-protected", checked: true, disabled: false};
+  const request = panel.onChange({target: input, type: "change"});
+  panel.openDevice = "device-1";
+  panel.$("#device-error").textContent = "Current client";
+  reject(new Error("Previous client"));
+  await request;
+  assert.equal(panel.$("#device-error").textContent, "Current client");
+});
+
+for (const outcome of ["succeeds", "fails"]) {
+  test(`reopening a client during protection save keeps one pending write until it ${outcome}`, async () => {
+    const {panel, calls} = setup();
+    const client = retainedClient(panel);
+    const input = panel.$("#client-protected");
+    Object.assign(input, {id: "client-protected", checked: true, disabled: false});
+    let resolve, reject;
+    let savedValue = false;
+    panel._hass.callWS = message => {
+      calls.push(["ws", JSON.parse(JSON.stringify(message))]);
+      if (message.type === "aruba_monitor/client_protect") return new Promise((done, fail) => { resolve = done; reject = fail; });
+      if (message.type === "aruba_monitor/client_devices") return Promise.resolve(haDevices());
+      const data = snapshot();
+      data.clients[0].protected = savedValue;
+      return Promise.resolve(data);
+    };
+    const request = panel.onChange({target: input, type: "change"});
+    await panel.refresh();
+    assert.equal(panel.pendingRender, true);
+    panel.$("#device-dialog").close();
+    await click(panel, {device: client.id}).run();
+    assert.match(panel.$("#device-content").innerHTML, /id="client-protected" type="checkbox" checked disabled/);
+    await panel.onChange({target: {id: "client-protected", checked: false, disabled: false}, type: "change"});
+    assert.equal(calls.filter(item => item[1].type === "aruba_monitor/client_protect").length, 1);
+    if (outcome === "succeeds") {
+      savedValue = true;
+      resolve({});
+    } else reject(new Error("Protection save failed"));
+    await request;
+    assert.equal(panel.$("#client-protected").checked, outcome === "succeeds");
+    assert.equal(panel.$("#client-protected").disabled, false);
+    assert.equal(panel.clientProtectionWrites.size, 0);
+    assert.equal(panel.$("#device-dialog").open, true);
+    assert.equal(panel.$("#device-dialog").scrollTop, 123);
+  });
+}
+
+test("cancelled client deletion names the client, explains scope and preserves popup and filters", async () => {
+  const {panel, calls} = setup(false);
+  const client = retainedClient(panel);
+  filters(panel);
+  await click(panel, {deleteClient: client.id}).run();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0][1], /pending device/);
+  assert.match(calls[0][1], /permanently.*observation history.*Aruba Monitor devices and entities/);
+  assert.match(calls[0][1], /other integrations are untouched/);
+  assert.match(calls[0][1], /discovered again/);
+  assert.equal(panel.$("#device-dialog").open, true);
+  assert.equal(panel.$("#device-dialog").scrollTop, 123);
+  assert.equal(panel.$("#client-search").value, "Saved search");
+  assert.equal(panel.campaignQueries.get("test-campaign"), "filter");
+});
+
+test("manual deletion works for a protected offline client and closes its popup after success", async () => {
+  const {panel, calls} = setup();
+  const client = retainedClient(panel, true);
+  panel.refresh = async force => calls.push(["refresh", force]);
+  const action = click(panel, {deleteClient: client.id});
+  await action.run();
+  assert.deepEqual(calls.slice(1), [["ws", {type: "aruba_monitor/client_delete", device_id: client.id}], ["refresh", true]]);
+  assert.equal(panel.$("#device-dialog").open, false);
+  assert.equal(panel.openDevice, null);
+  assert.equal(panel.$("#client-search").value, "Saved search");
+  assert.equal(action.button.disabled, false);
+});
+
+test("failed client deletion preserves popup, search, scroll and retry ability", async () => {
+  const {panel} = setup();
+  const client = retainedClient(panel);
+  panel._hass.callWS = async () => { throw new Error("Client is now connected"); };
+  const action = click(panel, {deleteClient: client.id});
+  await action.run();
+  assert.equal(panel.$("#device-dialog").open, true);
+  assert.equal(panel.openDevice, client.id);
+  assert.equal(panel.$("#client-search").value, "Saved search");
+  assert.equal(panel.$("#device-dialog").scrollTop, 123);
+  assert.equal(panel.$("#device-error").textContent, "Client is now connected");
+  assert.equal(action.button.disabled, false);
+});
+
+for (const state of ["another client", "closed dialog", "disconnected panel"]) {
+  test(`a late client deletion error cannot overwrite ${state}`, async () => {
+    const {panel} = setup();
+    const client = retainedClient(panel);
+    let reject;
+    panel._hass.callWS = () => new Promise((_resolve, fail) => { reject = fail; });
+    const request = click(panel, {deleteClient: client.id}).run();
+    if (state === "another client") panel.openDevice = "device-1";
+    if (state === "closed dialog") panel.$("#device-dialog").close();
+    if (state === "disconnected panel") panel.disconnectedCallback();
+    panel.$("#device-error").textContent = "Current client status";
+    reject(new Error("Previous client failed"));
+    await request;
+    assert.equal(panel.$("#device-error").textContent, "Current client status");
+    assert.equal(panel.$("#notice").textContent, "");
+  });
+}
+
+test("unapproved client and SSID deletions never prompt or send a command", async () => {
+  const {panel, calls} = setup();
+  const client = retainedClient(panel);
+  client.delete_allowed = false;
+  panel.data.ssids = [{ssid: "Connected", delete_allowed: false}];
+  await click(panel, {deleteClient: client.id}).run();
+  await click(panel, {deleteSsid: "Connected"}).run();
+  assert.equal(calls.length, 0);
+});
+
+test("SSID rendering shows last-seen timestamps and escaped deletion reasons", () => {
+  const {panel} = setup();
+  panel.data.ssids = [{ssid: ' Old <Wi-Fi> " ', in_inventory: false, connection: "unknown", last_seen: "2026-10-01T12:00:00Z", clients: 0, delete_allowed: false, delete_reason: "Collection <unknown>"}];
+  panel.renderNetwork();
+  const html = panel.$("#ssid-list").innerHTML;
+  assert.match(html, /Old &lt;Wi-Fi&gt; &quot;/);
+  assert.match(html, /badge unknown/);
+  assert.match(html, /title="2026-10-01T12:00:00Z"/);
+  assert.match(html, /Collection &lt;unknown&gt;/);
+  assert.match(html, /data-delete-ssid=" Old &lt;Wi-Fi&gt; &quot; " disabled/);
+});
+
+test("SSID deletion preserves exact names and explains retained history and rediscovery", async () => {
+  const {panel, calls} = setup();
+  const ssid = " Old Wi-Fi ";
+  panel.data.ssids = [{ssid, delete_allowed: true}];
+  panel.refresh = async force => calls.push(["refresh", force]);
+  await click(panel, {deleteSsid: ssid}).run();
+  assert.match(calls[0][1], /“ Old Wi-Fi ”/);
+  assert.match(calls[0][1], /local network inventory/);
+  assert.match(calls[0][1], /history and migration campaigns are retained/);
+  assert.match(calls[0][1], /appear again if detected/);
+  assert.deepEqual(calls.slice(1), [["ws", {type: "aruba_monitor/ssid_delete", ssid}], ["refresh", true]]);
+});
+
+for (const outcome of ["cancelled", "failed"]) {
+  test(`${outcome} SSID deletion preserves inventory, filters and retry ability`, async () => {
+    const {panel, calls} = setup(outcome !== "cancelled");
+    panel.data.ssids = [{ssid: "Old", delete_allowed: true}];
+    panel.$("#ssid-list").innerHTML = "Original SSID card";
+    panel.$("main").scrollTop = 234;
+    filters(panel);
+    if (outcome === "failed") panel._hass.callWS = async () => { throw new Error("Deletion failed"); };
+    const action = click(panel, {deleteSsid: "Old"});
+    await action.run();
+    assert.equal(panel.$("#ssid-list").innerHTML, "Original SSID card");
+    assert.equal(panel.$("main").scrollTop, 234);
+    assert.equal(panel.campaignQueries.get("test-campaign"), "filter");
+    assert.equal(action.button.disabled, false);
+    if (outcome === "cancelled") assert.equal(calls.length, 1);
+    else assert.equal(panel.$("#notice").textContent, "Deletion failed");
+  });
+}

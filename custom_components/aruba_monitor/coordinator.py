@@ -11,6 +11,8 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -19,7 +21,7 @@ from .config import ControllerSettings
 from .const import DOMAIN
 from .entity import build_metrics
 from .parser import ParseError
-from .store import Store
+from .store import Store, ssid_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +53,8 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._database_lock = asyncio.Lock()
         self._paused = False
         self._closed = False
+        self._consecutive_failures = 0
+        self._auth_failed = False
         self._remove_stale_timer = None
         self._remove_collector_listener = None
 
@@ -75,6 +79,15 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return self.snapshot
         snapshot["status"]["site_id"] = self.settings.site_id
         snapshot["status"]["backup_in_progress"] = self._paused
+        snapshot["status"]["track_new_devices"] = self.settings.track_new_devices
+        snapshot["status"]["consecutive_failures"] = self._consecutive_failures
+        snapshot["status"]["restored_presence"] = not snapshot["status"]["live_collection"]
+        snapshot["status"]["tracker_available"] = (
+            bool(snapshot["status"]["last_success"])
+            and self._consecutive_failures < 3
+            and not self._auth_failed
+            and not self._closed
+        )
         self.snapshot = snapshot
         self.metrics = build_metrics(snapshot, self.settings.site_id)
         self._schedule_stale_update()
@@ -105,20 +118,47 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.async_snapshot()
             self.async_update_listeners()
 
-    async def _failure(self, message):
+    async def _failure(self, message, *, authentication=False):
+        """Record one failed complete attempt; internal retries do not count."""
         async with self._database_lock:
-            if not self._closed and not self._paused:
-                await self.hass.async_add_executor_job(self.store.failure, message)
+            if self._closed or self._paused:
+                return False
+            self._consecutive_failures += 1
+            self._auth_failed = self._auth_failed or authentication
+            await self.hass.async_add_executor_job(self.store.failure, message)
         if not self._closed:
             await self.async_refresh_status()
+        return True
+
+    @callback
+    def _enabled_tracker_macs(self) -> set[str]:
+        """Read registry choices on the event loop before executor cleanup."""
+        registry = er.async_get(self.hass)
+        enabled_ids = {
+            entity.unique_id
+            for entity in er.async_entries_for_config_entry(registry, self.config_entry.entry_id)
+            if entity.domain == "device_tracker" and entity.platform == DOMAIN and entity.disabled_by is None
+        }
+        return {
+            client["mac"]
+            for client in self.snapshot.get("client_connections", [])
+            if f"aruba_{self.settings.site_id}_client_{ssid_id(dr.format_mac(client['mac']))}_tracker"
+            in enabled_ids
+        }
+
+    def _retained_update(self):
+        """A skipped attempt must not turn an established outage into recovery."""
+        if not self.last_update_success:
+            raise UpdateFailed(self.snapshot["status"]["last_error"] or "Controller unavailable")
+        return self.snapshot
 
     async def _async_update_data(self):
         if self._paused or self._closed:
-            return self.snapshot
+            return self._retained_update()
         try:
             async with self._collection_lock:
                 if self._closed:
-                    return self.snapshot
+                    return self._retained_update()
                 firmware = None
                 if not self._firmware_read:
                     version = await self.client.show("show version")
@@ -127,28 +167,45 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 clients, aps, networks = await self.client.collect()
                 async with self._database_lock:
                     if self._closed or self._paused:
-                        return self.snapshot
+                        return self._retained_update()
                     if firmware:
                         await self.hass.async_add_executor_job(self.store.set_meta, "firmware", firmware)
                         self._firmware_read = True
                     await self.hass.async_add_executor_job(self.store.ingest, clients, aps, networks)
+                    if self.settings.auto_delete_clients or self.settings.auto_delete_ssids:
+                        await self.hass.async_add_executor_job(
+                            self.store.cleanup,
+                            self.settings.client_retention_days
+                            if self.settings.auto_delete_clients
+                            else None,
+                            self.settings.ssid_retention_days if self.settings.auto_delete_ssids else None,
+                            None,
+                            self._enabled_tracker_macs(),
+                        )
+                    self._consecutive_failures = 0
+                    self._auth_failed = False
                     self.inventory_revision += 1
             if self._closed:
-                return self.snapshot
+                return self._retained_update()
             return await self.async_snapshot()
         except AuthError:
             message = "Controller authentication failed; reauthenticate Aruba Monitor"
-            await self._failure(message)
+            if not await self._failure(message, authentication=True):
+                return self._retained_update()
             raise ConfigEntryAuthFailed(message) from None
         except (ArubaError, ParseError) as exc:
-            await self._failure(str(exc))
+            if not await self._failure(str(exc)) or (
+                self._consecutive_failures < 3 and not self._auth_failed
+            ):
+                return self._retained_update()
             raise UpdateFailed(str(exc)) from None
         except asyncio.CancelledError, HomeAssistantError:
             raise
         except Exception:
             # Exceptions can contain sid URLs or controller data; never log them.
             message = "Unexpected collection failure; check controller and database permissions"
-            await self._failure(message)
+            if not await self._failure(message) or (self._consecutive_failures < 3 and not self._auth_failed):
+                return self._retained_update()
             raise UpdateFailed(message) from None
 
     async def async_mutate(self, operation: str, *args):
@@ -157,6 +214,8 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._paused or self._closed:
                 raise HomeAssistantError("Aruba Monitor is temporarily unavailable during backup or unload")
             result = await self.hass.async_add_executor_job(getattr(self.store, operation), *args)
+            if operation in {"delete_client", "delete_ssid"}:
+                self.inventory_revision += 1
         await self.async_refresh_status()
         return result
 

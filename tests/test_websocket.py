@@ -407,6 +407,7 @@ async def test_panel_hidden_from_nonadmin_frontend_listing(
     await admin.send_json_auto_id({"type": "get_panels"})
     admin_panels = await admin.receive_json()
     assert "aruba-monitor" in admin_panels["result"]
+    assert admin_panels["result"]["aruba-monitor"]["config_panel_domain"] is None
     user = await hass_ws_client(hass, access_token=hass_read_only_access_token)
     await user.send_json_auto_id({"type": "get_panels"})
     panels = await user.receive_json()
@@ -552,3 +553,80 @@ async def test_commands_without_loaded_entry_report_unavailable(hass, hass_ws_cl
     response = await command(client, "snapshot")
     assert response["success"] is False
     assert response["error"]["code"] == "unavailable"
+
+
+async def test_client_protection_and_manual_deletion_preserve_foreign_devices(hass, hass_ws_client, monitor):
+    from homeassistant.helpers import entity_registry as er
+
+    connection = await hass_ws_client(hass)
+    coordinator = monitor.runtime_data
+    retained = coordinator.snapshot["clients"][0]
+    device = client_device(hass, monitor, retained["macs"][0])
+    entities = er.async_get(hass)
+    native_entities = er.async_entries_for_device(entities, device.id, include_disabled_entities=True)
+    registry = dr.async_get(hass)
+    foreign_entry = MockConfigEntry(domain="test", unique_id="retained-foreign")
+    foreign_entry.add_to_hass(hass)
+    foreign = registry.async_get_or_create(
+        config_entry_id=foreign_entry.entry_id,
+        identifiers={("test", "foreign")},
+        connections={(dr.CONNECTION_NETWORK_MAC, retained["macs"][0])},
+        name="Foreign client",
+        manufacturer="Preserved manufacturer",
+    )
+    before = coordinator.inventory_revision
+    with patch.object(coordinator.client, "collect", new_callable=AsyncMock) as collect:
+        await successful(connection, "client_protect", device_id=retained["id"], protected=True)
+        assert next(c for c in coordinator.snapshot["clients"] if c["id"] == retained["id"])["protected"]
+        rejected = await command(connection, "client_delete", device_id=retained["id"])
+        assert not rejected["success"]
+        assert rejected["error"]["code"] == "invalid_operation"
+        assert coordinator.inventory_revision == before
+        collect.assert_not_awaited()
+    with patch.object(coordinator.client, "collect", return_value=([], [], [])):
+        await coordinator.async_refresh()
+    with patch.object(coordinator.client, "collect", new_callable=AsyncMock) as collect:
+        await successful(connection, "client_delete", device_id=retained["id"])
+        collect.assert_not_awaited()
+    await hass.async_block_till_done()
+    assert retained["id"] not in {c["id"] for c in coordinator.snapshot["clients"]}
+    assert not registry.async_get(device.id)
+    assert all(not entities.async_get(item.entity_id) for item in native_entities)
+    assert registry.async_get(foreign.id) is foreign
+
+
+async def test_ssid_deletion_requires_absence_and_preserves_history(hass, hass_ws_client, monitor):
+    connection = await hass_ws_client(hass)
+    coordinator = monitor.runtime_data
+    before = coordinator.snapshot["clients"]
+    rejected = await command(connection, "ssid_delete", ssid="Old Wi-Fi")
+    assert not rejected["success"]
+    assert rejected["error"]["code"] == "invalid_operation"
+    with patch.object(coordinator.client, "collect", return_value=([], [], [])):
+        await coordinator.async_refresh()
+    await successful(connection, "ssid_delete", ssid="Old Wi-Fi")
+    assert "Old Wi-Fi" not in {s["ssid"] for s in coordinator.snapshot["ssids"]}
+    assert [c["sightings"] for c in coordinator.snapshot["clients"]] == [c["sightings"] for c in before]
+
+
+@pytest.mark.parametrize("flag", ["_paused", "_closed"])
+@pytest.mark.parametrize(
+    ("name", "fields"),
+    [
+        ("client_delete", {"device_id": "any"}),
+        ("client_protect", {"device_id": "any", "protected": True}),
+        ("ssid_delete", {"ssid": "Old Wi-Fi"}),
+    ],
+)
+async def test_cleanup_commands_blocked_during_backup_and_unload(
+    hass, hass_ws_client, monitor, flag, name, fields
+):
+    connection = await hass_ws_client(hass)
+    coordinator = monitor.runtime_data
+    setattr(coordinator, flag, True)
+    try:
+        result = await command(connection, name, **fields)
+        assert not result["success"]
+        assert result["error"]["code"] == "unavailable"
+    finally:
+        setattr(coordinator, flag, False)

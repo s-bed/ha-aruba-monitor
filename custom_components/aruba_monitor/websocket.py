@@ -153,6 +153,12 @@ async def dispatch(hass, command, msg):
     elif command == "client_label":
         label = text(msg["label"], limit=100, trim=True)
         await coordinator.async_mutate("label", msg["device_id"], label)
+    elif command == "client_protect":
+        await coordinator.async_mutate("protect_client", msg["device_id"], msg["protected"])
+    elif command == "client_delete":
+        await coordinator.async_mutate("delete_client", msg["device_id"])
+    elif command == "ssid_delete":
+        await coordinator.async_mutate("delete_ssid", ssid(msg["ssid"]))
     elif command == "client_link":
         await coordinator.async_mutate("link", msg["device_id"], mac(msg["mac"]))
     elif command == "client_unlink":
@@ -172,6 +178,9 @@ COMMAND_FIELDS = {
     "campaign_delete": {"campaign_id": str},
     "campaign_exclude": {"campaign_id": str, "device_id": str, "excluded": bool},
     "client_label": {"device_id": str, "label": str},
+    "client_protect": {"device_id": str, "protected": bool},
+    "client_delete": {"device_id": str},
+    "ssid_delete": {"ssid": str},
     "client_link": {"device_id": str, "mac": str},
     "client_unlink": {"device_id": str, "mac": str},
 }

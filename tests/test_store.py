@@ -374,28 +374,329 @@ def test_version_one_with_weakened_column_definition_is_rejected(tmp_path):
         Store(path)
 
 
-def test_network_only_lists_latest_discovered_ssids_and_preserves_history(store, time_at):
+def test_network_retains_absent_ssids_and_preserves_history(store, time_at):
     store.ingest([client()], [ap()], inventory(), time_at(0))
     campaign_id = store.create_campaign("Rotation", "Old Wi-Fi", "Future Wi-Fi", time_at(1))
     before = store.network()
     store.failure("Controller unreachable")
-    assert store.network()["ssids"] == before["ssids"]
+    failed = store.network()["ssids"]
+    assert [row["id"] for row in failed] == [row["id"] for row in before["ssids"]]
+    assert all(row["connection"] == "unknown" and not row["delete_allowed"] for row in failed)
     # An invalid collection rolls back every inventory change.
     with pytest.raises(KeyError):
         store.ingest([], [ap()], [{"ssid": "New Wi-Fi"}, {}], time_at(2))
-    assert store.network()["ssids"] == before["ssids"]
+    assert store.network()["ssids"] == failed
     store.ingest([client(ssid="New Wi-Fi")], [ap()], [{"ssid": "New Wi-Fi"}], time_at(3))
-    assert [ssid["ssid"] for ssid in store.network()["ssids"]] == ["New Wi-Fi"]
-    assert store.network()["ssids"][0]["clients"] == 1
+    retained = {row["ssid"]: row for row in store.network()["ssids"]}
+    assert set(retained) == {"Empty guest", "New Wi-Fi", "Old Wi-Fi"}
+    assert retained["New Wi-Fi"]["clients"] == 1
+    assert retained["New Wi-Fi"]["connection"] == "connected"
+    assert not retained["Old Wi-Fi"]["in_inventory"]
+    assert retained["Old Wi-Fi"]["last_seen"] == time_at(0)
+    assert retained["Old Wi-Fi"]["connection"] == "offline"
+    assert retained["Old Wi-Fi"]["delete_allowed"]
     assert {row["ssid"] for row in store.clients()[0]["sightings"]} == {"Old Wi-Fi", "New Wi-Fi"}
     saved = next(row for row in store.campaigns() if row["id"] == campaign_id)
     assert saved["counts"]["confirmed"] == 1
     store.ingest([], [ap()], [], time_at(4))
-    assert store.network()["ssids"] == []
+    assert all(not row["in_inventory"] for row in store.network()["ssids"])
     assert len(store.clients()[0]["sightings"]) == 2
     # Rediscovery uses the exact same SSID identity, including case and spaces.
     store.ingest([], [ap()], [{"ssid": "Old Wi-Fi"}, {"ssid": "old wi-fi "}], time_at(5))
-    rediscovered = store.network()["ssids"]
+    rediscovered = {row["ssid"]: row for row in store.network()["ssids"]}
     original = next(row for row in before["ssids"] if row["ssid"] == "Old Wi-Fi")
-    assert rediscovered[0]["id"] == original["id"]
-    assert rediscovered[1]["id"] != original["id"]
+    assert rediscovered["Old Wi-Fi"]["id"] == original["id"]
+    assert rediscovered["Old Wi-Fi"]["in_inventory"]
+    assert rediscovered["old wi-fi "]["id"] != original["id"]
+
+
+def test_manual_client_deletion_requires_successful_absence_and_clears_its_history(store, time_at):
+    store.ingest([client(), client(mac="aa:bb:cc:00:00:02")], [ap()], inventory(), time_at(0))
+    deleted, retained = sorted(store.clients(), key=lambda row: row["mac"])
+    store.label(retained["id"], "Retained label")
+    store.protect_client(deleted["id"], True)
+    assert not deleted["delete_allowed"]
+    with pytest.raises(ValueError, match="still detected"):
+        store.delete_client(deleted["id"])
+    store.ingest([client(mac=retained["mac"])], [ap()], inventory(), time_at(1))
+    absent = next(row for row in store.clients() if row["id"] == deleted["id"])
+    assert absent["delete_allowed"] and absent["protected"]
+    store.delete_client(deleted["id"])
+    assert [row["id"] for row in store.clients()] == [retained["id"]]
+    assert store.clients()[0]["label"] == "Retained label"
+    for table in ("aliases", "sightings"):
+        assert (
+            store.db.execute(f"SELECT COUNT(*) FROM {table} WHERE mac=?", (deleted["mac"],)).fetchone()[0]
+            == 0
+        )
+    assert deleted["mac"] not in store._protected_macs()
+    assert store.db.execute("PRAGMA foreign_key_check").fetchall() == []
+    with pytest.raises(ValueError, match="not found"):
+        store.delete_client(deleted["id"])
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_failed_or_stale_collection_blocks_deletion_and_cleanup(store, time_at, failure):
+    store.ingest([client()], [ap()], inventory(), time_at(-60 * 86400))
+    device = store.clients()[0]["id"]
+    store.ingest([], [], [], time_at(0) if failure else time_at(-91))
+    if failure:
+        store.failure("Controller unavailable")
+    assert not store.clients()[0]["delete_allowed"]
+    assert all(not row["delete_allowed"] for row in store.network()["ssids"])
+    with pytest.raises(ValueError, match="fresh successful collection"):
+        store.delete_client(device)
+    with pytest.raises(ValueError, match="fresh successful collection"):
+        store.delete_ssid("Old Wi-Fi")
+    assert store.cleanup(30, 30, at=time_at(0)) == {"clients": 0, "ssids": 0}
+    assert len(store.clients()) == 1 and len(store.network()["ssids"]) == 3
+
+
+def test_startup_blocks_deletion_until_new_success_even_with_recent_saved_state(tmp_path, time_at):
+    path = str(tmp_path / "startup.sqlite3")
+    first = Store(path)
+    first.ingest([client()], [], inventory(), time_at(-60 * 86400))
+    device = first.clients()[0]["id"]
+    first.ingest([], [], [], time_at(0))
+    first.close()
+    second = Store(path)
+    try:
+        assert second.status()["fresh"]
+        assert not second.clients()[0]["delete_allowed"]
+        with pytest.raises(ValueError, match="fresh successful collection"):
+            second.delete_client(device)
+        with pytest.raises(ValueError, match="fresh successful collection"):
+            second.delete_ssid("Old Wi-Fi")
+        assert second.cleanup(30, 30, at=time_at(1)) == {"clients": 0, "ssids": 0}
+        second.ingest([], [], [], time_at(1))
+        assert second.cleanup(30, 30, at=time_at(1)) == {"clients": 1, "ssids": 3}
+    finally:
+        second.close()
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("evidence_only", [False, True])
+def test_saved_campaign_members_and_evidence_prevent_client_deletion(
+    store, time_at, completed, evidence_only
+):
+    store.ingest([client()], [], inventory(), time_at(-60 * 86400))
+    cid = store.create_campaign("Keep history", "Old Wi-Fi", "New Wi-Fi", time_at(-50 * 86400))
+    store.ingest([client(ssid="New Wi-Fi")], [], inventory(), time_at(-40 * 86400))
+    if completed:
+        with store.db:
+            store.db.execute("UPDATE campaigns SET completed_at=? WHERE id=?", (time_at(-39 * 86400), cid))
+    if evidence_only:
+        with store.db:
+            store.db.execute("DELETE FROM members WHERE campaign_id=?", (cid,))
+    device = store.clients()[0]["id"]
+    store.ingest([], [], [], time_at(0))
+    assert "saved migration campaign" in store.clients()[0]["delete_reason"]
+    with pytest.raises(ValueError, match="saved migration campaign"):
+        store.delete_client(device)
+    assert store.cleanup(30, None, at=time_at(0)) == {"clients": 0, "ssids": 0}
+    store.delete_campaign(cid)
+    assert store.clients()[0]["delete_allowed"]
+    store.delete_client(device)
+    assert not store.clients()
+
+
+def test_linked_client_deletion_requires_every_alias_absent(store, time_at):
+    other = client(mac="aa:bb:cc:00:00:02")
+    store.ingest([client(), other], [], [], time_at(0))
+    device = next(row for row in store.clients() if row["mac"] != other["mac"])["id"]
+    store.link(device, other["mac"])
+    store.ingest([other], [], [], time_at(1))
+    assert not store.clients()[0]["delete_allowed"]
+    with pytest.raises(ValueError, match="still detected"):
+        store.delete_client(device)
+    store.ingest([], [], [], time_at(2))
+    store.delete_client(device)
+    assert not store.clients()
+    assert store.db.execute("SELECT COUNT(*) FROM sightings").fetchone()[0] == 0
+
+
+def test_client_protection_follows_macs_across_link_unlink_and_restart(tmp_path, time_at):
+    path = str(tmp_path / "protection.sqlite3")
+    first = Store(path)
+    other = client(mac="aa:bb:cc:00:00:02")
+    first.ingest([client(), other], [], [], time_at(-60 * 86400))
+    devices = {row["mac"]: row["id"] for row in first.clients()}
+    first.protect_client(devices[client()["mac"]], True)
+    first.link(devices[other["mac"]], client()["mac"])
+    assert first.clients()[0]["protected"]
+    new_id = first.unlink(devices[other["mac"]], client()["mac"])
+    assert {row["id"]: row["protected"] for row in first.clients()} == {
+        devices[other["mac"]]: False,
+        new_id: True,
+    }
+    first.link(devices[other["mac"]], client()["mac"])
+    first.protect_client(devices[other["mac"]], True)
+    new_id = first.unlink(devices[other["mac"]], client()["mac"])
+    assert all(row["protected"] for row in first.clients())
+    first.protect_client(new_id, False)
+    first.close()
+    second = Store(path)
+    try:
+        second.ingest([], [], [], time_at(0))
+        assert second.cleanup(30, None, at=time_at(0)) == {"clients": 1, "ssids": 0}
+        assert second.clients()[0]["id"] == devices[other["mac"]]
+        assert second.clients()[0]["protected"]
+        second.protect_client(devices[other["mac"]], False)
+        assert second.cleanup(30, None, at=time_at(0)) == {"clients": 1, "ssids": 0}
+    finally:
+        second.close()
+
+
+def test_protect_and_unprotect_apply_to_all_current_aliases(store, time_at):
+    store.ingest([client(), client(mac="aa:bb:cc:00:00:02")], [], [], time_at(0))
+    device = store.clients()[0]["id"]
+    other = next(row for row in store.clients() if row["id"] != device)["mac"]
+    store.protect_client(device, True)
+    store.link(device, other)
+    store.protect_client(device, False)
+    assert not store._protected_macs()
+    store.protect_client(device, True)
+    assert store._protected_macs() == {client()["mac"], "aa:bb:cc:00:00:02"}
+    with pytest.raises(ValueError, match="true or false"):
+        store.protect_client(device, 1)
+    with pytest.raises(ValueError, match="not found"):
+        store.protect_client("missing", True)
+
+
+@pytest.mark.parametrize("elapsed", [30 * 86400 - 0.000001, 30 * 86400, 30 * 86400 + 1])
+def test_cleanup_retention_boundary_and_disabled_categories(store, time_at, elapsed):
+    store.ingest([client()], [], [{"ssid": "Old Wi-Fi"}], time_at(-elapsed))
+    store.ingest([], [], [], time_at(0))
+    assert store.cleanup(None, None, at=time_at(0)) == {"clients": 0, "ssids": 0}
+    count = int(elapsed >= 30 * 86400)
+    assert store.cleanup(30, 30, at=time_at(0)) == {"clients": count, "ssids": count}
+    assert len(store.clients()) == 1 - count
+    assert len(store.network()["ssids"]) == 1 - count
+
+
+@pytest.mark.parametrize("days", [0, -1, True, False, 1.5, "30"])
+def test_cleanup_rejects_invalid_retention_days(store, days):
+    for values in ((days, None), (None, days)):
+        with pytest.raises(ValueError, match="positive integer"):
+            store.cleanup(*values)
+
+
+def test_cleanup_handles_large_days_and_uses_latest_alias_seen(store, time_at):
+    other = client(mac="aa:bb:cc:00:00:02")
+    store.ingest([client()], [], [], time_at(-60 * 86400))
+    device = store.clients()[0]["id"]
+    store.ingest([other], [], [], time_at(-10 * 86400))
+    store.link(device, other["mac"])
+    store.ingest([], [], [], time_at(0))
+    assert store.cleanup(10**100, 10**100, at=time_at(0)) == {"clients": 0, "ssids": 0}
+    assert store.cleanup(30, None, at=time_at(0)) == {"clients": 0, "ssids": 0}
+
+
+def test_cleanup_skips_current_clients_and_inventory(store, time_at):
+    store.ingest([client()], [], [{"ssid": "Old Wi-Fi"}], time_at(-60 * 86400))
+    store.ingest([client()], [], [{"ssid": "Old Wi-Fi"}], time_at(0))
+    assert store.cleanup(1, 1, at=time_at(0)) == {"clients": 0, "ssids": 0}
+
+
+def test_cleanup_enabled_tracker_protects_every_identity_alias_until_disabled(store, time_at):
+    first, second = client(), client(mac="aa:bb:cc:00:00:02")
+    store.ingest([first, second], [], [], time_at(-60 * 86400))
+    device = store.clients()[0]["id"]
+    store.link(device, next(row["mac"] for row in store.clients() if row["id"] != device))
+    store.ingest([], [], [], time_at(0))
+    assert store.cleanup(30, None, time_at(0), {second["mac"]}) == {"clients": 0, "ssids": 0}
+    assert len(store.clients()[0]["macs"]) == 2
+    # Registry exemption is transient and does not become explicit protection.
+    assert not store.clients()[0]["protected"]
+    assert store.cleanup(30, None, time_at(0), set()) == {"clients": 1, "ssids": 0}
+    assert not store.clients()
+
+
+def test_enabled_tracker_does_not_block_explicit_manual_deletion(store, time_at):
+    store.ingest([client()], [], [], time_at(-60 * 86400))
+    device = store.clients()[0]["id"]
+    store.ingest([], [], [], time_at(0))
+    assert store.cleanup(30, None, time_at(0), {client()["mac"]}) == {"clients": 0, "ssids": 0}
+    store.delete_client(device)
+    assert not store.clients()
+
+
+def test_ssid_deletion_is_exact_and_preserves_campaigns_and_sightings(store, time_at):
+    names = ["Old Wi-Fi", "old wi-fi", "Old Wi-Fi "]
+    store.ingest([client()], [ap()], [{"ssid": name} for name in names], time_at(0))
+    store.create_campaign("Retain", names[0], names[1], time_at(1))
+    store.ingest([], [ap()], [], time_at(2))
+    before_campaign = store.campaigns()
+    before_clients = store.clients()
+    store.delete_ssid(names[0])
+    assert {row["ssid"] for row in store.network()["ssids"]} == set(names[1:])
+    assert store.clients() == before_clients
+    assert store.campaigns() == before_campaign
+    assert store.network()["aps"][0]["online"]
+    with pytest.raises(ValueError, match="SSID not found"):
+        store.delete_ssid(names[0])
+    store.ingest([], [], [{"ssid": names[0]}], time_at(3))
+    with pytest.raises(ValueError, match="still reported"):
+        store.delete_ssid(names[0])
+
+
+def test_current_client_prevents_ssid_deletion_without_inventory(store, time_at):
+    store.ingest([], [], [{"ssid": "Old Wi-Fi"}], time_at(-60 * 86400))
+    store.ingest([client()], [], [], time_at(0))
+    ssid = store.network()["ssids"][0]
+    assert not ssid["in_inventory"]
+    assert ssid["connection"] == "connected"
+    assert ssid["last_seen"] == time_at(0)
+    assert not ssid["delete_allowed"]
+    with pytest.raises(ValueError, match="Clients are still detected"):
+        store.delete_ssid("Old Wi-Fi")
+    assert store.cleanup(None, 30, at=time_at(0)) == {"clients": 0, "ssids": 0}
+
+
+def test_simultaneous_sightings_on_one_mac_prevent_deleting_either_ssid(store, time_at):
+    store.ingest([], [], [{"ssid": "Old Wi-Fi"}, {"ssid": "New Wi-Fi"}], time_at(-60 * 86400))
+    store.ingest([client(), client(ssid="New Wi-Fi")], [], [], time_at(0))
+    for name in ("Old Wi-Fi", "New Wi-Fi"):
+        with pytest.raises(ValueError, match="Clients are still detected"):
+            store.delete_ssid(name)
+    assert all(row["connection"] == "connected" for row in store.network()["ssids"])
+    assert store.cleanup(None, 30, at=time_at(0)) == {"clients": 0, "ssids": 0}
+
+
+def test_client_deletion_preserves_ssid_last_seen_for_longer_retention(store, time_at):
+    store.ingest([], [], [{"ssid": "Old Wi-Fi"}], time_at(-90 * 86400))
+    store.ingest([client()], [], [], time_at(-30 * 86400))
+    store.ingest([], [], [], time_at(0))
+    assert store.cleanup(30, 60, at=time_at(0)) == {"clients": 1, "ssids": 0}
+    assert store.network()["ssids"][0]["last_seen"] == time_at(-30 * 86400)
+    store.ingest([], [], [], time_at(30 * 86400))
+    assert store.cleanup(30, 60, at=time_at(30 * 86400)) == {"clients": 0, "ssids": 1}
+    assert store._get("ssid_last_seen") == {}
+
+
+@pytest.mark.parametrize("operation", ["client", "ssid", "cleanup"])
+def test_inventory_deletion_rolls_back_all_changes_on_storage_error(store, time_at, operation):
+    import sqlite3
+
+    store.ingest([client()], [], [{"ssid": "Old Wi-Fi"}], time_at(-60 * 86400))
+    device = store.clients()[0]["id"]
+    store.protect_client(device, True)
+    store.ingest([], [], [], time_at(0))
+    table = "inventory" if operation in ("ssid", "cleanup") else "devices"
+    if operation == "cleanup":
+        store.protect_client(device, False)
+    before = {
+        table: [tuple(row) for row in store.db.execute(f"SELECT * FROM {table}")]
+        for table in ("meta", "devices", "aliases", "sightings", "inventory")
+    }
+    store.db.executescript(f"""CREATE TEMP TRIGGER abort_inventory_delete BEFORE DELETE ON {table}
+        BEGIN SELECT RAISE(ABORT, 'test delete failure'); END;""")
+    with pytest.raises(sqlite3.IntegrityError, match="test delete failure"):
+        if operation == "client":
+            store.delete_client(device)
+        elif operation == "ssid":
+            store.delete_ssid("Old Wi-Fi")
+        else:
+            store.cleanup(30, 30, at=time_at(0))
+    for table, rows in before.items():
+        assert [tuple(row) for row in store.db.execute(f"SELECT * FROM {table}")] == rows

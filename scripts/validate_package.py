@@ -21,6 +21,7 @@ REQUIRED_FILES = (
     "coordinator.py",
     "sensor.py",
     "binary_sensor.py",
+    "device_tracker.py",
     "strings.json",
     "translations/en.json",
     "frontend/panel.js",

@@ -18,9 +18,11 @@ documentation and meaningful regression fixtures.
 Support exactly one controller and one config entry. Use native HA entities and
 an admin-only panel and WebSocket operations. Keep site/serial/exact-SSID identity
 hashes stable; renaming an AP must not create duplicate entities. Create client entities per
-observed MAC, with connectivity enabled and all other client sensors disabled by
-default. Register network MAC connections for native HA device linking; never
-merge other integrations’ records or infer physical identity from hostnames.
+observed MAC: one native device tracker, disabled by default unless Track new devices
+is enabled, plus optional diagnostic sensors disabled by default. Existing tracker
+enable/disable choices survive reloads and option changes. Register network MAC
+connections for native HA device linking; never merge other integrations’ records
+or infer physical identity from hostnames.
 Client entity IDs must survive campaign linking/unlinking and name/SSID changes.
 Counts describe observed MAC connections independently from identity grouping.
 
@@ -50,8 +52,17 @@ matches and unsupported hardware unknown. Never classify arbitrary hardware or
 the model list.
 
 Polling continues without enabled entities or an open panel. Collection failure
-immediately makes panel connectivity unknown, makes client connectivity entities
-unavailable, and prevents campaign completion.
+immediately makes panel connectivity unknown and prevents campaign completion/deletion.
+Trackers preserve retained home/away through two failed complete collection attempts;
+the third makes them unavailable until recovery. Log the outage and recovery once each.
+Rejected credentials make trackers unavailable immediately. Restore retained home/away
+before publishing trackers on restart, while keeping panel/completion freshness blocked.
+Ordinary client absence means available not_home. Poll every 30 seconds by default,
+with a configurable interval of 10–300 seconds. Client cleanup defaults on at 30 days;
+SSID cleanup defaults off. Enabled trackers, explicit client protection and campaign
+references prevent automatic client deletion. The config-entry version 2 upgrade
+enables client cleanup and disables new-device tracking once, preserves retention
+periods/SSID options, and clamps formerly valid intervals to the new range.
 Native statistics retain values until stale after three polling intervals; AP
 metrics additionally require AP availability; client statistics require that MAC
 in the last successful collection. Client last-seen timestamps remain available

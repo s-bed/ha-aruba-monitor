@@ -3,12 +3,14 @@
 import asyncio
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from conftest import ap, client, inventory
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
@@ -17,14 +19,14 @@ from custom_components.aruba_monitor.config import ControllerSettings
 from custom_components.aruba_monitor.const import DOMAIN
 from custom_components.aruba_monitor.coordinator import ArubaCoordinator
 from custom_components.aruba_monitor.sensor import ArubaSensor
-from custom_components.aruba_monitor.store import Store
+from custom_components.aruba_monitor.store import Store, ssid_id
 
 
 @pytest.fixture
 async def make_coordinator(hass, tmp_path):
     coordinators = []
 
-    async def create(*, history=False):
+    async def create(*, history=False, away=False):
         settings = ControllerSettings(
             aruba_host="controller.example", aruba_user="user", aruba_password="secret"
         )
@@ -35,7 +37,11 @@ async def make_coordinator(hass, tmp_path):
         def open_store():
             if history:
                 initial = Store(path)
-                initial.ingest([client()], [ap()], inventory())
+                initial.ingest(
+                    [client()], [ap()], inventory(), (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+                )
+                if away:
+                    initial.ingest([], [ap()], inventory())
                 initial.create_campaign("Rotation", "Old Wi-Fi", "New Wi-Fi")
                 initial.close()
             return Store(path, require_live_collection=True)
@@ -70,7 +76,10 @@ async def test_offline_initialization_exposes_history_and_blocks_live_readiness(
     assert not coordinator.metrics["collection_health"].value
     assert not coordinator.metrics["cluster_clients"].available
     await coordinator.async_refresh()
-    assert isinstance(coordinator.last_exception, UpdateFailed)
+    assert coordinator.last_update_success
+    assert coordinator.snapshot["status"]["consecutive_failures"] == 1
+    assert coordinator.snapshot["status"]["tracker_available"]
+    assert coordinator.snapshot["status"]["restored_presence"]
     assert coordinator.snapshot["clients"][0]["name"] == "Kitchen speaker"
     assert coordinator.snapshot["campaigns"][0]["counts"]["pending"] == 1
     assert coordinator.inventory_revision == 0
@@ -92,7 +101,7 @@ async def test_first_success_clears_startup_gate_and_failure_keeps_statistics(ma
     last_success = coordinator.snapshot["status"]["last_success"]
     coordinator.client.collect.side_effect = ArubaError("Controller unavailable")
     await coordinator.async_refresh()
-    assert not coordinator.last_update_success
+    assert coordinator.last_update_success
     assert coordinator.snapshot["status"]["last_success"] == last_success
     assert not coordinator.snapshot["status"]["fresh"]
     assert not coordinator.snapshot["status"]["stale"]
@@ -117,6 +126,7 @@ async def test_stale_deadline_expires_statistics_even_while_waiting_for_reauth(
         await coordinator.async_refresh()
     reauth.assert_called_once_with(hass)
     assert not coordinator.last_update_success
+    assert not coordinator.snapshot["status"]["tracker_available"]
     assert coordinator._unsub_refresh is None
     assert coordinator._remove_stale_timer is not None
     assert sensor.available
@@ -259,3 +269,193 @@ async def test_shutdown_drains_collection_cancels_timers_and_closes_once(make_co
         await coordinator.async_snapshot()
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         coordinator.store.db.execute("SELECT 1")
+
+
+async def test_automatic_cleanup_only_runs_after_successful_polls(make_coordinator):
+    coordinator = await make_coordinator()
+    coordinator.settings = replace(
+        coordinator.settings,
+        auto_delete_clients=True,
+        client_retention_days=7,
+        auto_delete_ssids=True,
+        ssid_retention_days=45,
+    )
+    await coordinator.async_initialize()
+    with patch.object(coordinator.store, "cleanup", wraps=coordinator.store.cleanup) as cleanup:
+        coordinator.client.collect.side_effect = ArubaError("Controller unavailable")
+        await coordinator.async_refresh()
+        cleanup.assert_not_called()
+        coordinator.client.collect.side_effect = None
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(7, 45, None, set())
+        await coordinator.async_prepare_backup()
+        await coordinator.async_refresh()
+        cleanup.assert_called_once()
+
+
+async def test_cleanup_defaults_clients_on_and_categories_can_be_enabled_independently(make_coordinator):
+    coordinator = await make_coordinator()
+    await coordinator.async_initialize()
+    with patch.object(coordinator.store, "cleanup", wraps=coordinator.store.cleanup) as cleanup:
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(30, None, None, set())
+        cleanup.reset_mock()
+        coordinator.settings = replace(
+            coordinator.settings, auto_delete_clients=False, auto_delete_ssids=True
+        )
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(None, 30, None, set())
+        cleanup.reset_mock()
+        coordinator.settings = replace(
+            coordinator.settings, auto_delete_ssids=False, auto_delete_clients=True
+        )
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(30, None, None, set())
+
+
+@pytest.mark.parametrize("error", [ArubaError("Controller unavailable"), RuntimeError("secret URL")])
+async def test_three_failed_collections_keep_presence_until_outage_and_log_once(
+    make_coordinator, caplog, error
+):
+    coordinator = await make_coordinator()
+    await coordinator.async_initialize()
+    assert not coordinator.snapshot["status"]["tracker_available"]
+    await coordinator.async_refresh()
+    coordinator.client.collect.side_effect = error
+    caplog.set_level("INFO", logger="custom_components.aruba_monitor.coordinator")
+    for failures in range(1, 6):
+        await coordinator.async_refresh()
+        status = coordinator.snapshot["status"]
+        assert status["consecutive_failures"] == failures
+        assert status["tracker_available"] == (failures < 3)
+        assert not status["fresh"]
+        assert coordinator.last_update_success == (failures < 3)
+        if failures >= 3:
+            assert isinstance(coordinator.last_exception, UpdateFailed)
+    assert caplog.text.count("Error fetching aruba_monitor data:") == 1
+    assert "secret URL" not in caplog.text
+    coordinator.client.collect.side_effect = None
+    for _ in range(2):
+        await coordinator.async_refresh()
+    assert caplog.text.count("Fetching aruba_monitor data recovered") == 1
+    assert coordinator.snapshot["status"]["consecutive_failures"] == 0
+    assert coordinator.snapshot["status"]["tracker_available"]
+    assert coordinator.snapshot["status"]["fresh"]
+
+
+async def test_success_resets_failed_attempt_counter(make_coordinator):
+    coordinator = await make_coordinator()
+    await coordinator.async_initialize()
+    for _ in range(2):
+        coordinator.client.collect.side_effect = ArubaError("Controller unavailable")
+        await coordinator.async_refresh()
+        await coordinator.async_refresh()
+        assert coordinator.snapshot["status"]["consecutive_failures"] == 2
+        coordinator.client.collect.side_effect = None
+        await coordinator.async_refresh()
+        assert coordinator.snapshot["status"]["consecutive_failures"] == 0
+        assert coordinator.snapshot["status"]["tracker_available"]
+
+
+@pytest.mark.parametrize("away", [False, True])
+async def test_restored_presence_ignores_history_staleness_until_three_new_failures(
+    make_coordinator, away, freezer
+):
+    coordinator = await make_coordinator(history=True, away=away)
+    freezer.tick(timedelta(days=2))
+    await coordinator.async_initialize()
+    status = coordinator.snapshot["status"]
+    assert status["stale"]
+    assert status["tracker_available"]
+    assert status["restored_presence"]
+    assert (coordinator.snapshot["client_connections"][0]["last_seen"] == status["last_success"]) != away
+    coordinator.client.collect.side_effect = ArubaError("Controller unavailable")
+    for failures in range(1, 4):
+        await coordinator.async_refresh()
+        assert coordinator.snapshot["status"]["tracker_available"] == (failures < 3)
+
+
+async def test_authentication_failure_stays_unavailable_until_successful_collection(
+    hass, make_coordinator, caplog
+):
+    coordinator = await make_coordinator(history=True)
+    await coordinator.async_initialize()
+    coordinator.client.collect.side_effect = AuthError("Private credentials")
+    with patch("homeassistant.config_entries.ConfigEntry.async_start_reauth_if_available") as reauth:
+        await coordinator.async_refresh()
+    reauth.assert_called_once_with(hass)
+    assert not coordinator.snapshot["status"]["tracker_available"]
+    assert not coordinator.last_update_success
+    coordinator.client.collect.side_effect = ArubaError("Controller unavailable")
+    caplog.set_level("INFO", logger="custom_components.aruba_monitor.coordinator")
+    await coordinator.async_refresh()
+    assert not coordinator.snapshot["status"]["tracker_available"]
+    assert not coordinator.last_update_success
+    assert "data recovered" not in caplog.text
+    coordinator.client.collect.side_effect = None
+    await coordinator.async_refresh()
+    assert coordinator.snapshot["status"]["tracker_available"]
+    assert coordinator.last_update_success
+    assert coordinator.snapshot["status"]["consecutive_failures"] == 0
+    assert "Private credentials" not in caplog.text
+
+
+async def test_backup_skipped_polls_preserve_outage_and_recovery_logging(make_coordinator, caplog):
+    coordinator = await make_coordinator(history=True)
+    await coordinator.async_initialize()
+    coordinator.client.collect.side_effect = ArubaError("Controller unavailable")
+    caplog.set_level("INFO", logger="custom_components.aruba_monitor.coordinator")
+    for _ in range(3):
+        await coordinator.async_refresh()
+    await coordinator.async_prepare_backup()
+    for _ in range(2):
+        await coordinator.async_refresh()
+    assert coordinator.snapshot["status"]["consecutive_failures"] == 3
+    assert not coordinator.last_update_success
+    assert "data recovered" not in caplog.text
+    coordinator.client.collect.side_effect = None
+    await coordinator.async_finish_backup()
+    await coordinator.hass.async_block_till_done()
+    assert coordinator.snapshot["status"]["consecutive_failures"] == 0
+    assert coordinator.last_update_success
+    assert caplog.text.count("Error fetching aruba_monitor data:") == 1
+    assert caplog.text.count("Fetching aruba_monitor data recovered") == 1
+
+
+async def test_backup_does_not_count_failed_inflight_poll(make_coordinator):
+    coordinator = await make_coordinator(history=True)
+    await coordinator.async_initialize()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def fail():
+        started.set()
+        await release.wait()
+        raise ArubaError("Controller unavailable")
+
+    coordinator.client.collect.side_effect = fail
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    await started.wait()
+    await coordinator.async_prepare_backup()
+    release.set()
+    await refresh
+    assert coordinator.snapshot["status"]["consecutive_failures"] == 0
+    assert coordinator.snapshot["status"]["tracker_available"]
+
+
+async def test_enabled_tracker_registry_choices_are_passed_to_cleanup(hass, make_coordinator):
+    coordinator = await make_coordinator(history=True)
+    await coordinator.async_initialize()
+    registry = er.async_get(hass)
+    unique_id = f"aruba_home_client_{ssid_id(client()['mac'])}_tracker"
+    tracker = registry.async_get_or_create(
+        "device_tracker", DOMAIN, unique_id, config_entry=coordinator.config_entry
+    )
+    # Other domains, integrations and entries must not protect a client.
+    registry.async_get_or_create("sensor", DOMAIN, unique_id, config_entry=coordinator.config_entry)
+    with patch.object(coordinator.store, "cleanup", wraps=coordinator.store.cleanup) as cleanup:
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(30, None, None, {client()["mac"]})
+        registry.async_update_entity(tracker.entity_id, disabled_by=er.RegistryEntryDisabler.USER)
+        cleanup.reset_mock()
+        await coordinator.async_refresh()
+        cleanup.assert_called_once_with(30, None, None, set())

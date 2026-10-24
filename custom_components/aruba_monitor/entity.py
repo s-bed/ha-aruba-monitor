@@ -132,6 +132,7 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
                 )
     for ssid in snapshot["ssids"]:
         sid = ssid["id"]
+        online = available and ssid["in_inventory"]
         device = DeviceInfo(
             identifiers={(DOMAIN, f"{parent_id}_ssid_{sid}")},
             name=ssid["ssid"],
@@ -139,7 +140,7 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
             model="Instant SSID",
             via_device=(DOMAIN, parent_id),
         )
-        add(f"ssid_{sid}_clients", "Clients", ssid["clients"], device, measurement=True)
+        add(f"ssid_{sid}_clients", "Clients", ssid["clients"], device, online=online, measurement=True)
         for ap in snapshot["aps"]:
             ap_id = ssid_id(ap["serial"])
             add(
@@ -147,6 +148,7 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
                 f"Clients on {ap['name']}",
                 ssid["by_ap"].get(ap["name"], 0),
                 device,
+                online=online,
                 measurement=True,
             )
         for band, label in (("2.4 GHz", "2_4"), ("5 GHz", "5"), ("6 GHz", "6"), ("unknown", "unknown")):
@@ -155,6 +157,7 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
                 f"Clients · {band}",
                 ssid["by_band"].get(band, 0),
                 device,
+                online=online,
                 measurement=True,
             )
     for client in snapshot["client_connections"]:
@@ -168,13 +171,13 @@ def build_metrics(snapshot: dict, site: str) -> dict[str, Metric]:
             via_device=(DOMAIN, parent_id),
         )
         add(
-            f"{key}_online",
-            "Wi-Fi connected",
-            connected if status["fresh"] else None,
+            f"{key}_tracker",
+            "Presence",
+            connected,
             device,
-            platform="binary_sensor",
-            online=status["fresh"],
-            device_class="connectivity",
+            platform="device_tracker",
+            online=status.get("tracker_available", bool(last_success)),
+            enabled_by_default=status.get("track_new_devices", False),
         )
         for field, label, unit, device_class in (
             ("ip", "IP address", None, None),
@@ -268,19 +271,19 @@ class ArubaEntity(CoordinatorEntity):
 
 
 async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_type):
-    """Discover metrics and retire absent radios/SSIDs after validated inventories."""
+    """Discover metrics and retire removed inventory after validated changes."""
     coordinator = entry.runtime_data
     entities = {}
     retiring = set()
     revision = coordinator.inventory_revision
 
     @callback
-    def remove_obsolete_ssid_devices():
+    def remove_obsolete_devices():
         # Device records belong to one config entry in supported HA releases.
         # Never remove foreign records or devices still holding native entities.
         registry = dr.async_get(hass)
         entity_registry = er.async_get(hass)
-        prefix = f"aruba_{coordinator.settings.site_id}_ssid_"
+        prefixes = tuple(f"aruba_{coordinator.settings.site_id}_{kind}_" for kind in ("ssid", "client"))
         active = {
             identifier
             for metric in coordinator.metrics.values()
@@ -290,7 +293,7 @@ async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_
             if (
                 device.identifiers
                 and all(
-                    domain == DOMAIN and identifier.startswith(prefix)
+                    domain == DOMAIN and identifier.startswith(prefixes)
                     for domain, identifier in device.identifiers
                 )
                 and not device.identifiers & active
@@ -311,7 +314,7 @@ async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_
                 entity_id = registry.async_get_entity_id(platform, DOMAIN, entity.unique_id)
                 if entity_id and registry.async_get(entity_id).config_entry_id == entry.entry_id:
                     registry.async_remove(entity_id)
-                remove_obsolete_ssid_devices()
+                remove_obsolete_devices()
         finally:
             retiring.discard(key)
             if not coordinator._closed:
@@ -332,7 +335,7 @@ async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_
             # Entry tasks may complete eagerly and call update() before returning.
             revision = coordinator.inventory_revision
             for key in list(entities.keys() - desired):
-                if "_radio_" in key or key.startswith("ssid_"):
+                if "_radio_" in key or key.startswith(("ssid_", "client_")):
                     entity = entities.pop(key)
                     retiring.add(key)
                     entry.async_create_task(hass, remove(key, entity), "Remove obsolete Aruba metric")
@@ -345,7 +348,11 @@ async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_
                     and registered.platform == DOMAIN
                     and (
                         "_radio_" in registered.unique_id
-                        or registered.unique_id.startswith(f"aruba_{coordinator.settings.site_id}_ssid_")
+                        or registered.unique_id.startswith(
+                            tuple(
+                                f"aruba_{coordinator.settings.site_id}_{kind}_" for kind in ("ssid", "client")
+                            )
+                        )
                     )
                     and registered.unique_id not in valid_ids
                     and registered.unique_id
@@ -353,7 +360,7 @@ async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_
                     and registered.unique_id not in {entity.unique_id for entity in entities.values()}
                 ):
                     registry.async_remove(registered.entity_id)
-            remove_obsolete_ssid_devices()
+            remove_obsolete_devices()
 
     entry.async_on_unload(coordinator.async_add_listener(update))
     update()
