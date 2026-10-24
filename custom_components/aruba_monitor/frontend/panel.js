@@ -200,23 +200,14 @@ class ArubaMonitorPanel extends HTMLElement {
   }
 
   renderDevice(id, preserveDraft = false) {
-    const selectedMac = preserveDraft ? this.$("#alias-mac")?.value : undefined;
     const selectedDevice = preserveDraft ? this.$("#ha-device-target")?.value : undefined;
     const pickerDraft = preserveDraft ? {query: this.$("#ha-device-search")?.value, expanded: this.$("#ha-device-search")?.getAttribute("aria-expanded") === "true"} : undefined;
     const client = this.data.clients.find(item => item.id === id);
     if (!client) { this.$("#device-dialog").close(); this.openDevice = null; return; }
     this.openDevice = id;
-    const otherMacs = this.data.clients.filter(item => item.id !== id).flatMap(item => item.macs.map(mac => ({mac, name: title(item)})));
     this.$("#device-content").innerHTML = `<div class="section-heading"><div><h2>${e(title(client))}</h2><p class="muted">First seen ${e(stamp(client.first_seen))}</p></div><button class="icon-button" data-close="device-dialog" aria-label="Close">×</button></div>
-      <div class="device-detail-grid">
-      <section class="device-column"><h3>Home Assistant devices</h3><div id="device-ha-links" aria-live="polite"><p class="muted">Loading devices…</p></div></section>
-      <section class="device-column device-identities">
-      <h3>MAC identities</h3><p class="muted">Link only MACs you have verified belong to this device. Migration evidence is recalculated; observations are preserved.</p>
-      ${client.macs.map(mac => `<div class="alias-row"><span class="mono">${e(mac)}</span>${client.macs.length > 1 ? `<button class="secondary" data-unlink="${e(mac)}">Unlink</button>` : ""}</div>`).join("")}
-      ${otherMacs.length ? `<form id="alias-form"><label for="alias-mac">Link an observed MAC from another device</label><div class="form-row"><select id="alias-mac" name="mac">${otherMacs.map(item => `<option value="${e(item.mac)}">${e(item.name)} · ${e(item.mac)}</option>`).join("")}</select><button>Link MAC</button></div></form>` : '<p class="muted">Other observed MAC addresses will be available to link here.</p>'}
-      </section><section class="device-history"><h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div></section></div><p id="device-error" class="error" role="alert"></p>`;
-    const select = this.$("#alias-mac");
-    if (select && Array.from(select.options).some(option => option.value === selectedMac)) select.value = selectedMac;
+      <div id="device-ha-links" class="device-detail-grid" aria-live="polite"><section class="device-column"><h3>Aruba Monitor device</h3><p class="muted">Loading device…</p></section><section class="device-column device-linking"><h3>Linked devices</h3><p class="muted">Loading devices…</p></section></div>
+      <section class="device-history"><h3>SSID observation history</h3><div class="table-wrap"><table><thead><tr><th>SSID / MAC</th><th>FIRST SEEN</th><th>LAST SEEN</th></tr></thead><tbody>${client.sightings.map(sighting => `<tr><td>${e(sighting.ssid)}<small class="mono">${e(sighting.mac)}</small></td><td>${e(stamp(sighting.first_seen))}</td><td>${e(stamp(sighting.last_seen))}</td></tr>`).join("")}</tbody></table></div></section><p id="device-error" class="error" role="alert"></p>`;
     return this.loadDeviceLinks(id, selectedDevice, pickerDraft);
   }
 
@@ -227,10 +218,11 @@ class ArubaMonitorPanel extends HTMLElement {
     const options = result.device_options || [];
     this.deviceOptions = options;
     this.$("#device-ha-links").innerHTML =
-      (result.devices.length ? rows(result.devices) : '<p class="muted">This client’s Home Assistant device is not registered yet.</p>') +
-      '<h3>Linked devices</h3>' +
+      `<section class="device-column"><h3>Aruba Monitor device${result.devices.length > 1 ? "s" : ""}</h3>` +
+      (result.devices.length ? rows(result.devices) : '<p class="muted">This client’s Aruba Monitor device is not registered yet.</p>') +
+      '</section><section class="device-column device-linking"><h3>Linked devices</h3>' +
       (result.linked_devices.length ? rows(result.linked_devices) : '<p class="muted">No linked Home Assistant devices found.</p>') +
-      (options.length ? `<form id="ha-device-link-form" class="device-link-panel"><label for="ha-device-search">Link a Home Assistant device</label><p class="caption" id="ha-device-help">Search by name or integration, then select the matching device.</p><div class="device-picker"><div class="device-search-field"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="ha-device-search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="ha-device-results" aria-describedby="ha-device-help ha-device-selection" autocomplete="off" placeholder="Search devices…"><button type="button" id="ha-device-clear" class="icon-button" aria-label="Clear device selection and search" hidden>×</button></div><input id="ha-device-target" type="hidden" name="target_device_id"><div id="ha-device-results" class="device-results" role="listbox" aria-label="Matching Home Assistant devices" hidden></div></div><div class="device-link-actions"><span id="ha-device-selection" class="caption" role="status">No device selected</span><button id="ha-device-submit" type="submit" disabled>Link device</button></div><p class="caption">Adds this client’s MAC addresses to the selected device in Home Assistant. Choose only a device you recognize as the same hardware.</p></form>` : '<p class="caption">Other Home Assistant devices will appear here when available to link.</p>');
+      (options.length ? `<form id="ha-device-link-form" class="device-link-panel"><div class="device-link-heading"><label for="ha-device-search">Link a Home Assistant device</label><span class="help-tooltip"><button type="button" class="help-button" aria-label="About linking a Home Assistant device" aria-describedby="ha-device-link-tooltip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4"/><circle cx="12" cy="17" r=".7" fill="currentColor" stroke="none"/></svg></button><span id="ha-device-link-tooltip" class="help-tooltip-text" role="tooltip">Adds this client’s MAC addresses to the selected device in Home Assistant. Choose only a device you recognize as the same hardware.</span></span></div><p class="caption" id="ha-device-help">Search by name or integration, then select the matching device.</p><div class="device-picker"><div class="device-search-field"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="ha-device-search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="ha-device-results" aria-describedby="ha-device-help ha-device-selection" autocomplete="off" placeholder="Search devices…"><button type="button" id="ha-device-clear" class="icon-button" aria-label="Clear device selection and search" hidden>×</button></div><input id="ha-device-target" type="hidden" name="target_device_id"><div id="ha-device-results" class="device-results" role="listbox" aria-label="Matching Home Assistant devices" hidden></div></div><div class="device-link-actions"><span id="ha-device-selection" class="caption" role="status">No device selected</span><button id="ha-device-submit" type="submit" disabled>Link device</button></div></form>` : '<p class="caption">Other Home Assistant devices will appear here when available to link.</p>') + '</section>';
     if (options.length) {
       this.$("#ha-device-target").value = "";
       this.$("#ha-device-search").value = pickerDraft?.query || "";
@@ -428,13 +420,6 @@ class ArubaMonitorPanel extends HTMLElement {
           await this.command("campaign_exclude", {campaign_id: button.dataset.campaign, device_id: button.dataset.exclude, excluded, note});
           await this.refresh(true);
         } finally { button.disabled = false; }
-      } else if (button.dataset.unlink) {
-        button.disabled = true;
-        try {
-          await this.command("client_unlink", {device_id: this.openDevice, mac: button.dataset.unlink});
-          await this.refresh(true);
-          this.renderDevice(this.openDevice, true);
-        } finally { button.disabled = false; }
       }
     } catch (error) {
       const deviceError = this.$("#device-error");
@@ -495,10 +480,6 @@ class ArubaMonitorPanel extends HTMLElement {
         if (this.mounted && generation === this.generation && deviceRequest === this.deviceRequest && this.openDevice === deviceId && this.$("#device-dialog").open) {
           this.renderDeviceLinks(result, values.target_device_id);
         }
-      } else if (form.id === "alias-form") {
-        await this.command("client_link", {device_id: this.openDevice, ...values});
-        await this.refresh(true);
-        this.renderDevice(this.openDevice, true);
       }
     } catch (error) {
       if (form.id === "ha-device-link-form" && (!this.mounted || generation !== this.generation || deviceRequest !== this.deviceRequest || this.openDevice !== deviceId || !this.$("#device-dialog").open)) return;

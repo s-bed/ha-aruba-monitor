@@ -103,9 +103,10 @@ strings before inserting HTML.
   non-source/non-target sightings into campaign evidence. Target timestamps
   refer to the exact target; `first_away_seen`/`last_away_seen` describe any
   non-source SSID.
-- Link and unlink observed MACs manually. Evidence remains attached to original
-  MACs; recalculate campaign results after identity changes. Device labels and
-  MAC links are global, and do not change network connection counts.
+- Keep MAC grouping controls out of the panel. Preserve existing global identity
+  groups, device labels, MAC links and evidence on original MACs for compatibility;
+  identity changes must still recalculate campaign results without changing
+  network connection counts.
 - Exclusions require a note and apply only to one campaign. An exclusion on any
   enrolled alias excludes the combined identity. Unlinking retains original
   alias exclusions. Restoring a client returns it to progress calculations.
