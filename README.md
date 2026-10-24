@@ -94,7 +94,7 @@ Merging a pull request into `main` automatically publishes a release. The workfl
 
 To publish manually, open **Actions → Release → Run workflow**. Manual runs always release `main`, even if another branch is selected in the run dialog. Each new manual run increments the patch version; rerunning the same workflow run retries its original release without another bump.
 
-Each release is named **latest**, has a permanent version tag such as `v0.2.1`, and is marked as GitHub’s latest release. The [latest release page](https://github.com/s-bed/ha-aruba-monitor/releases/latest) always opens the newest published version. A rolling `latest` Git tag points to the same commit. Versioned release tags let HACS detect updates and let you select an older version.
+Each release uses its version tag as its name, such as **v0.2.1**, and the newest version is marked as GitHub’s latest release. The [latest release page](https://github.com/s-bed/ha-aruba-monitor/releases/latest) always opens the newest published version. A rolling `latest` Git tag points to the same commit. Versioned release tags let HACS detect updates and let you select an older version.
 
 Each release includes `aruba_monitor.zip`. Extract it into `<HA config>/custom_components` to install its `aruba_monitor` folder, then restart Home Assistant. HACS installs directly from the integration directory in the selected version.
 
