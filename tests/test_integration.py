@@ -261,3 +261,35 @@ async def test_device_metadata_and_parent_links_refresh_with_retained_inventory(
         if device.id != parent.id
     )
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_ssid_devices_retire_after_successful_inventory_without_losing_clients(
+    hass, tmp_path, transport
+):
+    from homeassistant.helpers import entity_registry as er
+
+    entry = await setup_entry(hass, tmp_path)
+    coordinator = entry.runtime_data
+    devices = dr.async_get(hass)
+    entities = er.async_get(hass)
+    old_ssid = coordinator.snapshot["ssids"][0]
+    identifier = (DOMAIN, f"aruba_home_ssid_{old_ssid['id']}")
+    device = devices.async_get_device_by_identifier(identifier, entry.entry_id)
+    assert device
+    native_entities = er.async_entries_for_device(entities, device.id, include_disabled_entities=True)
+    assert native_entities
+    clients = coordinator.snapshot["clients"]
+    with patch.object(coordinator.client, "collect", side_effect=ArubaError("Controller unavailable")):
+        await coordinator.async_refresh()
+    assert devices.async_get(device.id)
+    assert all(entities.async_get(entity.entity_id) for entity in native_entities)
+    # All tables succeeded, but this SSID no longer exists on the controller.
+    with patch.object(coordinator.client, "collect", return_value=([], [], [])):
+        await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert coordinator.snapshot["ssids"] == []
+    assert not devices.async_get(device.id)
+    assert all(not entities.async_get(entity.entity_id) for entity in native_entities)
+    assert {row["id"] for row in coordinator.snapshot["clients"]} == {row["id"] for row in clients}
+    assert all(row["sightings"] for row in coordinator.snapshot["clients"])
+    assert await hass.config_entries.async_unload(entry.entry_id)

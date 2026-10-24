@@ -268,23 +268,50 @@ class ArubaEntity(CoordinatorEntity):
 
 
 async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_type):
-    """Discover metrics dynamically and retire radios after validated inventories."""
+    """Discover metrics and retire absent radios/SSIDs after validated inventories."""
     coordinator = entry.runtime_data
     entities = {}
     retiring = set()
     revision = coordinator.inventory_revision
 
+    @callback
+    def remove_obsolete_ssid_devices():
+        # Device records belong to one config entry in supported HA releases.
+        # Never remove foreign records or devices still holding native entities.
+        registry = dr.async_get(hass)
+        entity_registry = er.async_get(hass)
+        prefix = f"aruba_{coordinator.settings.site_id}_ssid_"
+        active = {
+            identifier
+            for metric in coordinator.metrics.values()
+            for identifier in metric.device["identifiers"]
+        }
+        for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+            if (
+                device.identifiers
+                and all(
+                    domain == DOMAIN and identifier.startswith(prefix)
+                    for domain, identifier in device.identifiers
+                )
+                and not device.identifiers & active
+                and not er.async_entries_for_device(
+                    entity_registry, device.id, include_disabled_entities=True
+                )
+            ):
+                registry.async_remove_device(device.id)
+
     async def remove(key, entity):
         try:
             if entity.hass is not None:
                 await entity.async_remove()
-            # A new inventory may reintroduce the radio while removal awaits HA.
+            # A new inventory may reintroduce the metric while removal awaits HA.
             # Defer its replacement until this finishes and preserve its registry ID.
             if key not in coordinator.metrics:
                 registry = er.async_get(hass)
                 entity_id = registry.async_get_entity_id(platform, DOMAIN, entity.unique_id)
                 if entity_id and registry.async_get(entity_id).config_entry_id == entry.entry_id:
                     registry.async_remove(entity_id)
+                remove_obsolete_ssid_devices()
         finally:
             retiring.discard(key)
             if not coordinator._closed:
@@ -305,10 +332,10 @@ async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_
             # Entry tasks may complete eagerly and call update() before returning.
             revision = coordinator.inventory_revision
             for key in list(entities.keys() - desired):
-                if "_radio_" in key:
+                if "_radio_" in key or key.startswith("ssid_"):
                     entity = entities.pop(key)
                     retiring.add(key)
-                    entry.async_create_task(hass, remove(key, entity), "Remove obsolete Aruba radio")
+                    entry.async_create_task(hass, remove(key, entity), "Remove obsolete Aruba metric")
             # Also retire disabled entities left in the registry from an older run.
             registry = er.async_get(hass)
             valid_ids = {f"aruba_{coordinator.settings.site_id}_{key}" for key in desired}
@@ -316,13 +343,17 @@ async def async_setup_metrics(hass, entry, async_add_entities, platform, entity_
                 if (
                     registered.domain == platform
                     and registered.platform == DOMAIN
-                    and "_radio_" in registered.unique_id
+                    and (
+                        "_radio_" in registered.unique_id
+                        or registered.unique_id.startswith(f"aruba_{coordinator.settings.site_id}_ssid_")
+                    )
                     and registered.unique_id not in valid_ids
                     and registered.unique_id
                     not in {f"aruba_{coordinator.settings.site_id}_{key}" for key in retiring}
                     and registered.unique_id not in {entity.unique_id for entity in entities.values()}
                 ):
                     registry.async_remove(registered.entity_id)
+            remove_obsolete_ssid_devices()
 
     entry.async_on_unload(coordinator.async_add_listener(update))
     update()

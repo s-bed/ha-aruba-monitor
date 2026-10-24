@@ -5,6 +5,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from conftest import ap, client, inventory
 from homeassistant.components.sensor import SensorStateClass
 from homeassistant.helpers import entity_registry as er
@@ -263,7 +264,8 @@ async def test_obsolete_radios_removed_only_after_validated_inventory_for_this_e
     assert registry.async_get_entity_id("sensor", DOMAIN, radio_one.unique_id) is not None
 
 
-async def test_reappearing_radio_waits_for_old_entity_retirement_and_keeps_registry(hass, store):
+@pytest.mark.parametrize("kind", ["radio", "ssid"])
+async def test_reappearing_metric_waits_for_old_entity_retirement_and_keeps_registry(hass, store, kind):
     import asyncio
 
     metrics = build_metrics(make_snapshot(store), "home")
@@ -283,7 +285,11 @@ async def test_reappearing_radio_waits_for_old_entity_retirement_and_keeps_regis
             added.append(entity)
 
     await async_setup_metrics(hass, entry, add_entities, "sensor", ArubaSensor)
-    key = f"ap_{ssid_id('SERIAL01')}_radio_0_band"
+    key = (
+        f"ap_{ssid_id('SERIAL01')}_radio_0_band"
+        if kind == "radio"
+        else f"ssid_{ssid_id('Old Wi-Fi')}_clients"
+    )
     old_radio = next(entity for entity in added if entity.key == key)
     registered = registry.async_update_entity(old_radio.entity_id, name="Preserve this user's name")
     started, release = asyncio.Event(), asyncio.Event()
@@ -293,7 +299,7 @@ async def test_reappearing_radio_waits_for_old_entity_retirement_and_keeps_regis
         await release.wait()
 
     old_radio.async_remove = slow_remove
-    coordinator.metrics = {key: metric for key, metric in metrics.items() if "_radio_" not in key}
+    coordinator.metrics = {name: metric for name, metric in metrics.items() if name != key}
     coordinator.inventory_revision = 1
     coordinator.listeners[0]()
     await started.wait()
@@ -308,3 +314,88 @@ async def test_reappearing_radio_waits_for_old_entity_retirement_and_keeps_regis
     assert replacement == old_radio.entity_id
     assert registry.async_get(replacement).id == registered.id
     assert registry.async_get(replacement).name == "Preserve this user's name"
+
+
+async def test_absent_ssid_metrics_and_devices_retire_only_after_validated_inventory(hass, store, time_at):
+    from homeassistant.helpers import device_registry as dr
+
+    store.ingest([client()], [ap()], inventory(), time_at(0))
+    original_metrics = build_metrics(store.snapshot(), "home")
+    coordinator = fake_coordinator(original_metrics)
+    entry = MockConfigEntry(domain=DOMAIN, unique_id="home")
+    entry.add_to_hass(hass)
+    entry.runtime_data = coordinator
+    other_entry = MockConfigEntry(domain="other", unique_id="other")
+    other_entry.add_to_hass(hass)
+    entities = er.async_get(hass)
+    devices = dr.async_get(hass)
+    old_prefix = f"aruba_home_ssid_{ssid_id('Old Wi-Fi')}"
+    old_device = devices.async_get_or_create(
+        config_entry_id=entry.entry_id, identifiers={(DOMAIN, old_prefix)}, name="Old Wi-Fi"
+    )
+    # Foreign device records must survive even if they expose the same identifier.
+    foreign_device = devices.async_get_or_create(
+        config_entry_id=other_entry.entry_id, identifiers={(DOMAIN, old_prefix)}, name="Foreign device"
+    )
+    # Include a disabled entity from a previous run and a device without entities.
+    disabled = entities.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        f"{old_prefix}_disabled",
+        config_entry=entry,
+        device_id=old_device.id,
+        disabled_by=er.RegistryEntryDisabler.USER,
+    )
+    orphan = devices.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"aruba_home_ssid_{ssid_id('Retired Wi-Fi')}")},
+    )
+    added = []
+
+    def add_entities(new_entities):
+        for entity in new_entities:
+            device = devices.async_get_or_create(config_entry_id=entry.entry_id, **entity.metric.device)
+            registered = entities.async_get_or_create(
+                "sensor", DOMAIN, entity.unique_id, config_entry=entry, device_id=device.id
+            )
+            entity.entity_id = registered.entity_id
+            entity.hass = hass
+            entity.async_remove = AsyncMock()
+            added.append(entity)
+
+    await async_setup_metrics(hass, entry, add_entities, "sensor", ArubaSensor)
+    old_entities = [entity for entity in added if entity.unique_id.startswith(old_prefix)]
+    # A failure does not advance the successful inventory revision.
+    store.failure("Controller unreachable")
+    coordinator.metrics = build_metrics(store.snapshot(), "home")
+    coordinator.listeners[0]()
+    await hass.async_block_till_done()
+    assert devices.async_get(old_device.id)
+    assert devices.async_get(orphan.id)
+    assert entities.async_get(disabled.entity_id)
+    assert all(not entity.async_remove.called for entity in old_entities)
+    store.ingest([], [ap()], [{"ssid": "New Wi-Fi"}], time_at(1))
+    coordinator.metrics = build_metrics(store.snapshot(), "home")
+    coordinator.inventory_revision = 1
+    coordinator.listeners[0]()
+    await hass.async_block_till_done()
+    assert all(entity.async_remove.await_count == 1 for entity in old_entities)
+    assert not entities.async_get(disabled.entity_id)
+    assert not devices.async_get(old_device.id)
+    assert not devices.async_get(orphan.id)
+    assert devices.async_get(foreign_device.id)
+    assert not any(
+        row.unique_id.startswith(old_prefix)
+        for row in er.async_entries_for_config_entry(entities, entry.entry_id)
+    )
+    assert any(row.key.startswith("client_") for row in added)
+    assert store.clients()[0]["sightings"][0]["ssid"] == "Old Wi-Fi"
+    # The stable SSID identifier returns when the controller discovers it again.
+    store.ingest([], [ap()], inventory(), time_at(2))
+    coordinator.metrics = build_metrics(store.snapshot(), "home")
+    coordinator.inventory_revision = 2
+    coordinator.listeners[0]()
+    await hass.async_block_till_done()
+    replacement = devices.async_get_device_by_identifier((DOMAIN, old_prefix), entry.entry_id)
+    assert replacement
+    assert entities.async_get_entity_id("sensor", DOMAIN, f"{old_prefix}_clients")

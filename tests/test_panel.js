@@ -17,6 +17,11 @@ function setup(confirm = true) {
       if (!nodes.has(selector)) nodes.set(selector, {
         value: "", innerHTML: "", textContent: "", hidden: false, open: false,
         scrollTop: 0, scrollLeft: 0, options: [],
+        dataset: {}, attributes: new Map(),
+        setAttribute(name, value) { this.attributes.set(name, value); },
+        getAttribute(name) { return this.attributes.get(name); },
+        removeAttribute(name) { this.attributes.delete(name); },
+        focus() { root.activeElement = this; }, scrollIntoView() {},
         classList: {add() {}, toggle() {}},
         close() { this.open = false; }, showModal() { this.open = true; },
       });
@@ -423,13 +428,14 @@ test("the native device picker escapes option identifiers, names and integration
   }];
   panel._hass.callWS = async () => result;
   await click(panel, {device: "device-0"}).run();
-  const html = panel.$("#device-ha-links").innerHTML;
-  assert.match(html, /<form id="ha-device-link-form">/);
-  assert.match(html, /name="target_device_id" required/);
-  assert.match(html, /value="target&quot; onclick=&quot;bad\(\)"/);
+  panel.renderDeviceOptions();
+  const html = panel.$("#device-ha-links").innerHTML + panel.$("#ha-device-results").innerHTML;
+  assert.match(html, /<form id="ha-device-link-form" class="device-link-panel">/);
+  assert.match(html, /type="hidden" name="target_device_id"/);
+  assert.match(html, /data-device-option="target&quot; onclick=&quot;bad\(\)"/);
   assert.match(html, /&lt;img src=x onerror=&quot;bad\(\)&quot;&gt;/);
   assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
-  assert.doesNotMatch(html, /<img|<script>|value="target" onclick=/);
+  assert.doesNotMatch(html, /<img|<script>|data-device-option="target" onclick=/);
 });
 
 function nativeDeviceForm(target = "target-device") {
@@ -536,3 +542,118 @@ for (const state of ["another client", "closed dialog", "disconnected panel"]) {
     assert.equal(button.disabled, false);
   });
 }
+
+async function searchablePicker() {
+  const state = setup();
+  state.panel._hass.callWS = async () => ({...haDevices(), device_options: [
+    {id: "kitchen", name: "Kitchen audio", macs: [], integration: "media_player"},
+    {id: "hall", name: "Hall lamp", macs: [], integration: "hue"},
+    {id: "bedroom", name: "Bedroom audio", macs: [], integration: "media_player"},
+  ]});
+  await click(state.panel, {device: "device-0"}).run();
+  const input = state.panel.$("#ha-device-search");
+  input.id = "ha-device-search";
+  return {...state, input};
+}
+
+test("device search dynamically matches names and integrations and clears old selections", async () => {
+  const {panel, input, calls} = await searchablePicker();
+  input.value = "AUDIO media";
+  panel.onInput({target: input});
+  assert.equal(panel.deviceMatches.length, 2);
+  assert.match(panel.$("#ha-device-results").innerHTML, /Kitchen audio|Bedroom audio/);
+  assert.doesNotMatch(panel.$("#ha-device-results").innerHTML, /Hall lamp/);
+  assert.equal(input.getAttribute("aria-expanded"), "true");
+  await click(panel, {deviceOption: "kitchen"}).run();
+  assert.equal(panel.$("#ha-device-target").value, "kitchen");
+  assert.equal(input.value, "Kitchen audio");
+  assert.equal(panel.$("#ha-device-submit").disabled, false);
+  assert.equal(panel.$("#ha-device-results").hidden, true);
+  panel.onInput({target: input, type: "change"});
+  assert.equal(panel.$("#ha-device-target").value, "kitchen");
+  input.value = "Hall";
+  panel.onInput({target: input});
+  assert.equal(panel.$("#ha-device-target").value, "");
+  assert.equal(panel.$("#ha-device-submit").disabled, true);
+  assert.equal(panel.deviceMatches.length, 1);
+  assert.equal(calls.length, 0); // Filtering and selecting never write to HA.
+});
+
+test("device search supports keyboard selection, escape, no matches and clearing", async () => {
+  const {panel, input} = await searchablePicker();
+  const key = value => panel.onDevicePickerKey({target: input, key: value, preventDefault() {}, stopPropagation() {}});
+  panel.renderDeviceOptions();
+  key("ArrowUp");
+  assert.equal(input.getAttribute("aria-activedescendant"), "ha-device-option-2");
+  key("ArrowDown");
+  assert.equal(input.getAttribute("aria-activedescendant"), "ha-device-option-0");
+  key("Enter");
+  assert.equal(panel.$("#ha-device-target").value, "kitchen");
+  key("ArrowDown");
+  key("Escape");
+  assert.equal(input.getAttribute("aria-expanded"), "false");
+  assert.equal(input.getAttribute("aria-activedescendant"), undefined);
+  input.value = "missing device";
+  panel.onInput({target: input});
+  assert.match(panel.$("#ha-device-results").innerHTML, /No matching devices/);
+  key("ArrowDown");
+  key("Enter");
+  assert.equal(panel.$("#ha-device-target").value, "");
+  await click(panel, {}, "ha-device-clear").run();
+  assert.equal(input.value, "");
+  assert.equal(panel.deviceMatches.length, 3);
+});
+
+test("unselected or unknown device search text cannot submit a link", async () => {
+  const {panel, calls} = await searchablePicker();
+  for (const id of ["", "unknown-id"]) {
+    const {form} = nativeDeviceForm(id);
+    await panel.onSubmit({target: form, preventDefault() {}});
+    assert.match(panel.$("#device-error").textContent, /Select a device/);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("device search drafts and results survive refresh and identity edits", async () => {
+  const {panel, input} = await searchablePicker();
+  input.value = "media";
+  panel.onInput({target: input});
+  const results = panel.$("#ha-device-results").innerHTML;
+  panel.$("#device-dialog").scrollTop = 150;
+  const deviceResponse = panel._hass.callWS;
+  panel._hass.callWS = async () => snapshot();
+  await panel.refresh();
+  assert.equal(input.value, "media");
+  assert.equal(panel.$("#ha-device-results").innerHTML, results);
+  panel._hass.callWS = deviceResponse;
+  await panel.renderDevice("device-0", true);
+  assert.equal(panel.$("#ha-device-search").value, "media");
+  assert.equal(panel.$("#ha-device-results").innerHTML, results);
+});
+
+test("network shows only discovered SSIDs including zero-client networks", () => {
+  const {panel} = setup();
+  panel.data.ssids = [
+    {ssid: "Current", in_inventory: true, clients: 1, by_ap: {Office: 1}, by_band: {"5 GHz": 1}},
+    {ssid: "Empty guest", in_inventory: true, clients: 0, by_ap: {}, by_band: {}},
+    {ssid: "Historical", in_inventory: false, clients: 0, by_ap: {}, by_band: {}},
+  ];
+  panel.renderNetwork();
+  const html = panel.$("#ssid-list").innerHTML;
+  assert.match(html, /Current/);
+  assert.match(html, /Empty guest/);
+  assert.doesNotMatch(html, /Historical/);
+  assert.match(panel.$("#network-summary").innerHTML, /<strong>2<\/strong><span>Discovered SSIDs/);
+  panel.data.ssids = [];
+  panel.renderNetwork();
+  assert.match(panel.$("#ssid-list").innerHTML, /No SSIDs discovered/);
+});
+
+test("migration SSID suggestions retain history without adding it to Network", () => {
+  const {panel} = setup();
+  panel.data.clients[0].sightings = [{ssid: 'Old <Wi-Fi>'}];
+  panel.renderSnapshot();
+  assert.match(panel.$("#ssid-options").innerHTML, /Old &lt;Wi-Fi&gt;/);
+  assert.match(panel.$("#ssid-options").innerHTML, /value="Old"|value="New"/);
+  assert.doesNotMatch(panel.$("#ssid-list").innerHTML, /Old &lt;Wi-Fi&gt;/);
+});
