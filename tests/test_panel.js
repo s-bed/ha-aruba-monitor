@@ -278,6 +278,112 @@ test("failed form writes leave the draft open and show an error", async () => {
   assert.equal(button.disabled, false);
 });
 
+function campaignForm(panel) {
+  const button = panel.$("#campaign-submit");
+  const form = {
+    id: "campaign-form", fields: {name: "Rotation", source: "Old", target: "New"}, resets: 0,
+    querySelector: () => button,
+    reset() { this.resets++; this.fields = {name: "", source: "", target: ""}; },
+  };
+  return {button, form};
+}
+
+test("successful campaign creation resets its own draft and blocks duplicate pending submissions", async () => {
+  const {panel} = setup();
+  let resolve;
+  let writes = 0;
+  let refreshes = 0;
+  panel._hass.callWS = () => { writes++; return new Promise(done => { resolve = done; }); };
+  panel.refresh = async () => { refreshes++; };
+  await click(panel, {}, "new-campaign").run();
+  const {button, form} = campaignForm(panel);
+  const request = panel.onSubmit({target: form, preventDefault() {}});
+  assert.equal(button.disabled, true);
+  await panel.onSubmit({target: form, preventDefault() {}});
+  assert.equal(writes, 1);
+  assert.equal(button.disabled, true);
+  resolve({ok: true});
+  await request;
+  assert.equal(panel.$("#campaign-dialog").open, false);
+  assert.equal(form.resets, 1);
+  assert.deepEqual(form.fields, {name: "", source: "", target: ""});
+  assert.equal(button.disabled, false);
+  assert.equal(refreshes, 1);
+});
+
+const campaignDraftTransitions = {
+  "closed dialog": async panel => { await click(panel, {close: "campaign-dialog"}).run(); },
+  "reopened draft": async panel => {
+    await click(panel, {close: "campaign-dialog"}).run();
+    await click(panel, {}, "new-campaign").run();
+  },
+  "disconnected panel": async panel => { panel.disconnectedCallback(); },
+  "remounted panel": async panel => { panel.disconnectedCallback(); panel.connectedCallback(); },
+};
+const campaignResponses = {
+  success: pending => pending.resolve({ok: true}),
+  error: pending => pending.reject(new Error("Previous campaign failed")),
+};
+
+for (const [outcome, respond] of Object.entries(campaignResponses)) {
+  for (const [state, transition] of Object.entries(campaignDraftTransitions)) {
+    test(`a late campaign creation ${outcome} cannot change a ${state}`, async () => {
+      const {panel} = setup();
+      let pending;
+      let refreshes = 0;
+      panel._hass.callWS = () => new Promise((resolve, reject) => { pending = {resolve, reject}; });
+      panel.refresh = async () => { refreshes++; };
+      await click(panel, {}, "new-campaign").run();
+      const {button, form} = campaignForm(panel);
+      const request = panel.onSubmit({target: form, preventDefault() {}});
+      assert.equal(button.disabled, true);
+      await transition(panel);
+      const open = panel.$("#campaign-dialog").open;
+      const refreshesBeforeResponse = refreshes;
+      form.fields = {name: "New draft", source: "Another source", target: "Another target"};
+      panel.$("#campaign-error").textContent = "Current draft status";
+      respond(pending);
+      await request;
+      assert.equal(panel.$("#campaign-dialog").open, open);
+      assert.deepEqual(form.fields, {name: "New draft", source: "Another source", target: "Another target"});
+      assert.equal(form.resets, 0);
+      assert.equal(panel.$("#campaign-error").textContent, "Current draft status");
+      assert.equal(button.disabled, false);
+      assert.equal(refreshes - refreshesBeforeResponse, outcome === "success" && ["closed dialog", "reopened draft"].includes(state) ? 1 : 0);
+    });
+  }
+
+  test(`a previous campaign ${outcome} cannot enable the submit button of a newer pending request`, async () => {
+    const {panel} = setup();
+    const pending = [];
+    panel._hass.callWS = () => new Promise((resolve, reject) => { pending.push({resolve, reject}); });
+    panel.refresh = async () => {};
+    await click(panel, {}, "new-campaign").run();
+    const {button, form} = campaignForm(panel);
+    const first = panel.onSubmit({target: form, preventDefault() {}});
+    await click(panel, {close: "campaign-dialog"}).run();
+    await click(panel, {}, "new-campaign").run();
+    assert.equal(button.disabled, false);
+    form.fields = {name: "New draft", source: "Another source", target: "Another target"};
+    const second = panel.onSubmit({target: form, preventDefault() {}});
+    assert.equal(pending.length, 2);
+    assert.equal(button.disabled, true);
+    panel.$("#campaign-error").textContent = "Current draft status";
+    respond(pending[0]);
+    await first;
+    assert.equal(panel.$("#campaign-dialog").open, true);
+    assert.equal(form.fields.name, "New draft");
+    assert.equal(form.resets, 0);
+    assert.equal(panel.$("#campaign-error").textContent, "Current draft status");
+    assert.equal(button.disabled, true);
+    pending[1].resolve({ok: true});
+    await second;
+    assert.equal(panel.$("#campaign-dialog").open, false);
+    assert.equal(form.resets, 1);
+    assert.equal(button.disabled, false);
+  });
+}
+
 test("the panel waits for a hass connection before starting its refresh timer", () => {
   const {panel, intervals} = setup();
   panel._hass = undefined;

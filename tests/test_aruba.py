@@ -160,7 +160,25 @@ async def test_collection_error_identifies_command_without_controller_output(has
     assert client.sid is None
 
 
-async def test_malformed_snapshot_retries_whole_collection_with_fresh_session(hass):
+@pytest.mark.parametrize(
+    "malformed_command,malformed_output,first_pass",
+    [
+        ("show aps", "", ["show clients", "show aps"]),
+        (
+            "show clients",
+            "unsupported output\nNumber of Clients :0\nunexpected non-table row\n",
+            ["show clients"],
+        ),
+        (
+            "show aps",
+            "unsupported output\n0 Access Points\nunexpected non-table row\n",
+            ["show clients", "show aps"],
+        ),
+    ],
+)
+async def test_malformed_snapshot_retries_whole_collection_with_fresh_session(
+    hass, malformed_command, malformed_output, first_pass
+):
     calls = []
     outputs = {"show clients": "clients.txt", "show aps": "aps.txt", "show network": "networks.txt"}
     fixtures = {command: (FIXTURES / filename).read_text() for command, filename in outputs.items()}
@@ -175,7 +193,9 @@ async def test_malformed_snapshot_retries_whole_collection_with_fresh_session(ha
         command = request["params"]["cmd"]
         calls.append(command)
         output = (
-            "" if command == "show aps" and request["params"]["sid"] == "old-session" else fixtures[command]
+            malformed_output
+            if command == malformed_command and request["params"]["sid"] == "old-session"
+            else fixtures[command]
         )
         return Response({"Status": "Success", "Command output": output})
 
@@ -186,8 +206,7 @@ async def test_malformed_snapshot_retries_whole_collection_with_fresh_session(ha
     assert {client["band"] for client in clients} == {"2.4 GHz", "5 GHz"}
     assert all(radio["band"] for ap in aps for radio in ap["radios"])
     assert calls == [
-        "show clients",
-        "show aps",
+        *first_pass,
         "logout",
         "login",
         "show clients",

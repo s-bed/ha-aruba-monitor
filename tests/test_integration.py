@@ -1,7 +1,9 @@
 """Load the packaged integration through the real Home Assistant lifecycle."""
 
+import asyncio
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from copy import deepcopy
@@ -12,14 +14,17 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from homeassistant.components import frontend
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.aruba_monitor import parser
 from custom_components.aruba_monitor.aruba import ArubaClient, ArubaError
+from custom_components.aruba_monitor.backup import async_post_backup, async_pre_backup
 from custom_components.aruba_monitor.bands import resolve_bands
 from custom_components.aruba_monitor.const import DOMAIN, FRONTEND_URL, PANEL_URL
 from custom_components.aruba_monitor.store import Store, ssid_id
+from custom_components.aruba_monitor.websocket import link_client_device
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -113,6 +118,92 @@ async def test_unload_and_reload_close_old_runtime_without_duplicate_collector(h
     ]
     assert current._remove_collector_listener is not None
     assert len([panel for panel in hass.data[frontend.DATA_PANELS] if panel == PANEL_URL]) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_reload_during_backup_keeps_collection_and_mutations_paused(hass, tmp_path, transport):
+    entry = await setup_entry(hass, tmp_path)
+    original = entry.runtime_data
+    last_success = original.snapshot["status"]["last_success"]
+    clients = original.snapshot["clients"]
+    await async_pre_backup(hass)
+    transport.reset_mock()
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    current = entry.runtime_data
+    assert current is not original
+    assert original._closed
+    assert current.backup_in_progress
+    assert current.snapshot["status"]["backup_in_progress"]
+    assert current.snapshot["status"]["last_success"] == last_success
+    assert not current.snapshot["status"]["live_collection"]
+    assert current.inventory_revision == 0
+    assert current.snapshot["clients"]
+    # Unload logs out the original controller session; the replacement never polls.
+    assert all(call.args[1] == "/rest/logout" for call in transport.await_args_list)
+    device_id = clients[0]["id"]
+    with pytest.raises(HomeAssistantError, match="backup"):
+        await current.async_mutate("label", device_id, "Blocked during backup")
+    with pytest.raises(HomeAssistantError, match="backup"):
+        link_client_device(hass, current, device_id, "unused-target")
+    await current.async_refresh()
+    assert current.snapshot["status"]["last_success"] == last_success
+    assert current.inventory_revision == 0
+
+    transport.reset_mock()
+    await async_post_backup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not current.backup_in_progress
+    assert current.snapshot["status"]["fresh"]
+    assert current.inventory_revision == 1
+    assert transport.await_count >= 4
+    await current.async_mutate("label", device_id, "Saved after backup")
+    assert current.snapshot["clients"][0]["label"] == "Saved after backup"
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_setup_during_backup_waits_for_post_backup_before_collecting(hass, tmp_path, transport):
+    # A backup can begin before the integration has a loaded config entry.
+    await async_pre_backup(hass)
+    entry = await setup_entry(hass, tmp_path)
+    coordinator = entry.runtime_data
+    assert coordinator.backup_in_progress
+    assert coordinator.snapshot["status"]["backup_in_progress"]
+    assert coordinator.snapshot["status"]["last_success"] is None
+    assert not coordinator.snapshot["status"]["fresh"]
+    transport.assert_not_awaited()
+    await async_post_backup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not coordinator.backup_in_progress
+    assert coordinator.snapshot["status"]["fresh"]
+    assert coordinator.inventory_revision == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (sqlite3.OperationalError("Synthetic checkpoint failure"), HomeAssistantError),
+        (asyncio.CancelledError(), asyncio.CancelledError),
+    ],
+)
+async def test_failed_pre_backup_hook_does_not_leave_collection_paused(
+    hass, tmp_path, transport, error, expected
+):
+    entry = await setup_entry(hass, tmp_path)
+    coordinator = entry.runtime_data
+    revision = coordinator.inventory_revision
+    with patch.object(coordinator.store, "checkpoint", side_effect=error):
+        with pytest.raises(expected):
+            await async_pre_backup(hass)
+    assert not coordinator._paused
+    assert not coordinator.backup_in_progress
+    # Failed preparation is allowed to return without a post-backup hook.
+    await coordinator.async_refresh()
+    assert coordinator.snapshot["status"]["fresh"]
+    assert not coordinator.snapshot["status"]["backup_in_progress"]
+    assert coordinator.inventory_revision == revision + 1
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 

@@ -10,7 +10,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.aruba_monitor.aruba import ArubaClient
+from custom_components.aruba_monitor.aruba import ArubaClient, ArubaError
 from custom_components.aruba_monitor.const import DOMAIN
 from custom_components.aruba_monitor.store import ssid_id
 from custom_components.aruba_monitor.websocket import COMMAND_FIELDS, async_register_commands
@@ -492,6 +492,28 @@ async def test_completion_requires_new_away_evidence_and_freezes_exclusions(hass
     assert result["success"] is False
     assert "read-only" in result["error"]["message"]
     await successful(client, "campaign_delete", campaign_id=campaign["id"])
+
+
+async def test_campaign_deletion_rejects_outage_without_losing_saved_history(hass, hass_ws_client, monitor):
+    client = await hass_ws_client(hass)
+    campaign = await successful(
+        client, "campaign_create", name="Preserve on outage", source="Old Wi-Fi", target="New Wi-Fi"
+    )
+    coordinator = monitor.runtime_data
+    with patch.object(coordinator.client, "collect", side_effect=ArubaError("Synthetic controller outage")):
+        await coordinator.async_refresh()
+    before = await successful(client, "snapshot")
+    assert not before["status"]["fresh"]
+    result = await command(client, "campaign_delete", campaign_id=campaign["id"])
+    assert result["success"] is False
+    assert result["error"]["code"] == "invalid_operation"
+    assert "fresh successful collection" in result["error"]["message"]
+    after = await successful(client, "snapshot")
+    assert after["campaigns"] == before["campaigns"]
+    await coordinator.async_refresh()
+    assert coordinator.snapshot["status"]["fresh"]
+    await successful(client, "campaign_delete", campaign_id=campaign["id"])
+    assert (await successful(client, "snapshot"))["campaigns"] == []
 
 
 @pytest.mark.parametrize(

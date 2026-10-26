@@ -51,7 +51,8 @@ def table(text: str, required: set[str], count_pattern: str | None = None) -> li
             break
     else:
         # Some firmware emits only an explicit zero count, without a table header.
-        count = re.search(count_pattern, text, re.I) if count_pattern else None
+        content = [line.strip() for line in lines if line.strip()]
+        count = re.fullmatch(count_pattern, content[0], re.I) if count_pattern and len(content) == 1 else None
         if count and count.group(1) == "0":
             return []
         raise ParseError("Missing or unsupported table header")
@@ -59,12 +60,20 @@ def table(text: str, required: set[str], count_pattern: str | None = None) -> li
     for line in lines[index + 1 :]:
         if not line.strip():
             continue
-        if re.match(r"\s*(?:Number of |Info timestamp|Total\s|\d+\s+(?:Access Points|Networks))", line, re.I):
+        # Match whole metadata lines: a valid name can start with these words.
+        if re.fullmatch(
+            r"\s*(?:Number of Clients\s*:\s*\d+|Info timestamp\s*:\s*\d+|"
+            r"\d+\s+(?:Access Points|Networks))\s*",
+            line,
+            re.I,
+        ):
             continue
         values = [line[start:end].strip() for start, end in zip(starts, ends)]
         rows.append(dict(zip(names, values)))
     if count_pattern:
-        count = re.search(count_pattern, text, re.I)
+        count = next(
+            (match for line in lines if (match := re.fullmatch(count_pattern, line.strip(), re.I))), None
+        )
         if not count:
             raise ParseError("Missing row count; output may be truncated")
         if len(rows) != int(count[1]):

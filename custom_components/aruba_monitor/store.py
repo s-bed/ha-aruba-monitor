@@ -588,6 +588,8 @@ class Store:
     def delete_campaign(self, campaign_id: str):
         with self.lock, self.db:
             self._campaign(campaign_id)
+            if reason := self._collection_delete_reason(self.status()):
+                raise ValueError(reason)
             self.db.execute("DELETE FROM evidence WHERE campaign_id=?", (campaign_id,))
             self.db.execute("DELETE FROM members WHERE campaign_id=?", (campaign_id,))
             self.db.execute("DELETE FROM campaigns WHERE id=?", (campaign_id,))

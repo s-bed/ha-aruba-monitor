@@ -22,6 +22,7 @@ class ArubaMonitorPanel extends HTMLElement {
     this.activeDeviceOption = -1;
     this.campaignQueries = new Map();
     this.campaignStates = new Map();
+    this.campaignSubmission = null;
     this.expandedCampaigns = new Set();
     this.viewScroll = new Map();
     this.view = "clients";
@@ -69,7 +70,7 @@ class ArubaMonitorPanel extends HTMLElement {
           <label>Target SSID<input name="target" list="ssid-options" maxlength="32" required placeholder="New network"></label>
           <p class="muted">Source clients join automatically. A sighting on any other SSID after this campaign starts confirms migration.</p>
           <p id="campaign-error" class="error" role="alert"></p>
-          <button type="submit">Create campaign</button>
+          <button id="campaign-submit" type="submit">Create campaign</button>
         </form>
       </dialog>
       <dialog id="device-dialog"><div id="device-content"></div></dialog>
@@ -107,6 +108,7 @@ class ArubaMonitorPanel extends HTMLElement {
     this.mounted = false;
     this.generation += 1;
     this.deviceRequest += 1;
+    this.invalidateCampaignSubmission();
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
   }
@@ -125,6 +127,11 @@ class ArubaMonitorPanel extends HTMLElement {
   }
 
   $(selector) { return this.shadowRoot.querySelector(selector); }
+
+  invalidateCampaignSubmission() {
+    this.campaignSubmission = null;
+    this.$("#campaign-submit").disabled = false;
+  }
 
   command(name, fields = {}) {
     return this._hass.callWS({type: `aruba_monitor/${name}`, ...fields});
@@ -386,6 +393,7 @@ class ArubaMonitorPanel extends HTMLElement {
         this.$(`#${button.dataset.close}`).close();
         this.renderPending();
       } else if (button.id === "new-campaign") {
+        this.invalidateCampaignSubmission();
         this.$("#campaign-error").textContent = "";
         this.$("#campaign-dialog").showModal();
       } else if (button.dataset.device) {
@@ -527,6 +535,7 @@ class ArubaMonitorPanel extends HTMLElement {
   async onSubmit(event) {
     event.preventDefault();
     const form = event.target;
+    if (form.id === "campaign-form" && this.campaignSubmission) return;
     const values = Object.fromEntries(new FormData(form));
     if (form.id === "ha-device-link-form" && !this.deviceOptions.some(device => device.id === values.target_device_id)) {
       this.$("#device-error").textContent = "Select a device from the search results first.";
@@ -535,14 +544,20 @@ class ArubaMonitorPanel extends HTMLElement {
     const deviceId = this.openDevice;
     const generation = this.generation;
     let deviceRequest;
+    let campaignSubmission;
+    const currentCampaign = () => this.mounted && generation === this.generation && this.campaignSubmission === campaignSubmission && this.$("#campaign-dialog").open;
     const submit = form.querySelector('button[type="submit"], button:not([type])');
     if (submit) submit.disabled = true;
     try {
       if (form.id === "campaign-form") {
+        campaignSubmission = this.campaignSubmission = {};
+        this.$("#campaign-error").textContent = "";
         await this.command("campaign_create", values);
-        this.$("#campaign-dialog").close();
-        form.reset();
-        await this.refresh(true);
+        if (currentCampaign()) {
+          this.$("#campaign-dialog").close();
+          form.reset();
+        }
+        if (this.mounted && generation === this.generation) await this.refresh(true);
       } else if (form.id === "ha-device-link-form") {
         this.$("#device-error").textContent = "";
         deviceRequest = ++this.deviceRequest;
@@ -552,9 +567,15 @@ class ArubaMonitorPanel extends HTMLElement {
         }
       }
     } catch (error) {
+      if (form.id === "campaign-form" && !currentCampaign()) return;
       if (form.id === "ha-device-link-form" && (!this.mounted || generation !== this.generation || deviceRequest !== this.deviceRequest || this.openDevice !== deviceId || !this.$("#device-dialog").open)) return;
       this.$(form.id === "campaign-form" ? "#campaign-error" : "#device-error").textContent = error.message || "Request failed";
-    } finally { if (submit) submit.disabled = false; }
+    } finally {
+      if (form.id !== "campaign-form" || this.campaignSubmission === campaignSubmission) {
+        if (form.id === "campaign-form") this.campaignSubmission = null;
+        if (submit) submit.disabled = false;
+      }
+    }
   }
 }
 
