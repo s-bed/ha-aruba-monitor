@@ -101,7 +101,7 @@ def client_devices(hass, coordinator, device_id):
 
 def link_client_device(hass, coordinator, device_id, target_device_id):
     """Attach verified client MACs to the selected native HA device without merging."""
-    if coordinator._paused or coordinator._closed:
+    if coordinator.backup_in_progress or coordinator._closed:
         raise HomeAssistantError("Aruba Monitor is temporarily unavailable during backup or unload")
     macs = client_macs(coordinator, device_id)
     registry = dr.async_get(hass)

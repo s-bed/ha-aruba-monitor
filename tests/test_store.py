@@ -251,6 +251,59 @@ def test_campaign_delete_is_atomic(store, time_at):
     assert store.db.execute("SELECT COUNT(*) FROM evidence WHERE campaign_id=?", (cid,)).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize("completed", [False, True], ids=["active", "completed"])
+@pytest.mark.parametrize("unavailable", ["failed", "stale", "restart"])
+def test_campaign_deletion_preserves_history_until_collection_recovers(
+    tmp_path, time_at, monkeypatch, completed, unavailable
+):
+    path = str(tmp_path / "campaign-deletion.sqlite3")
+    store = Store(path, require_live_collection=True)
+    try:
+        store.ingest([client(), client(mac="aa:bb:cc:00:00:02")], [ap()], inventory(), time_at(0))
+        cid = store.create_campaign("Preserve until recovery", "Old Wi-Fi", "New Wi-Fi", time_at(1))
+        excluded = next(c for c in store.clients() if c["mac"].endswith("02"))
+        store.exclude(cid, excluded["id"], True, "Retained exclusion")
+        store.ingest([client(ssid="New Wi-Fi")], [ap()], inventory(), time_at(2))
+        if completed:
+            store.complete(cid)
+        if unavailable == "failed":
+            store.failure("Synthetic controller outage")
+        elif unavailable == "stale":
+            monkeypatch.setattr("custom_components.aruba_monitor.store.utcnow", lambda: time_at(93))
+        else:
+            store.close()
+            store = Store(path, require_live_collection=True)
+        before = {
+            table: [tuple(row) for row in store.db.execute(f"SELECT * FROM {table}")]
+            for table in (
+                "meta",
+                "devices",
+                "aliases",
+                "sightings",
+                "inventory",
+                "campaigns",
+                "members",
+                "evidence",
+            )
+        }
+        assert not store.status()["fresh"]
+        with pytest.raises(ValueError, match="fresh successful collection"):
+            store.delete_campaign(cid)
+        for table, rows in before.items():
+            assert [tuple(row) for row in store.db.execute(f"SELECT * FROM {table}")] == rows
+        store.ingest([client(ssid="New Wi-Fi")], [ap()], inventory(), time_at(95))
+        assert store.status()["fresh"]
+        store.delete_campaign(cid)
+        assert store.campaigns() == []
+        assert len(store.clients()) == 2
+        for table, column in (("campaigns", "id"), ("members", "campaign_id"), ("evidence", "campaign_id")):
+            assert (
+                store.db.execute(f"SELECT COUNT(*) FROM {table} WHERE {column}=?", (cid,)).fetchone()[0] == 0
+            )
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("version", [0, 2, 99])
 def test_unsupported_schema_is_not_initialized_or_relabelled(tmp_path, version):
     import sqlite3

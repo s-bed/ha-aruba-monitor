@@ -17,6 +17,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .aruba import ArubaClient, ArubaError, AuthError
+from .backup import BACKUP_IN_PROGRESS
 from .config import ControllerSettings
 from .const import DOMAIN
 from .entity import build_metrics
@@ -58,6 +59,11 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._remove_stale_timer = None
         self._remove_collector_listener = None
 
+    @property
+    def backup_in_progress(self) -> bool:
+        """Keep replacements paused until the integration's post-backup hook."""
+        return self._paused or self.hass.data.get(BACKUP_IN_PROGRESS, False)
+
     async def async_initialize(self):
         """Publish history first; network outages must not prevent setup."""
         await self.async_snapshot()
@@ -78,7 +84,7 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._closed:
                 return self.snapshot
         snapshot["status"]["site_id"] = self.settings.site_id
-        snapshot["status"]["backup_in_progress"] = self._paused
+        snapshot["status"]["backup_in_progress"] = self.backup_in_progress
         snapshot["status"]["track_new_devices"] = self.settings.track_new_devices
         snapshot["status"]["consecutive_failures"] = self._consecutive_failures
         snapshot["status"]["restored_presence"] = not snapshot["status"]["live_collection"]
@@ -121,7 +127,7 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _failure(self, message, *, authentication=False):
         """Record one failed complete attempt; internal retries do not count."""
         async with self._database_lock:
-            if self._closed or self._paused:
+            if self._closed or self.backup_in_progress:
                 return False
             self._consecutive_failures += 1
             self._auth_failed = self._auth_failed or authentication
@@ -153,7 +159,7 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self.snapshot
 
     async def _async_update_data(self):
-        if self._paused or self._closed:
+        if self.backup_in_progress or self._closed:
             return self._retained_update()
         try:
             async with self._collection_lock:
@@ -166,7 +172,7 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     firmware = match[0] if match else "unrecognized"
                 clients, aps, networks = await self.client.collect()
                 async with self._database_lock:
-                    if self._closed or self._paused:
+                    if self._closed or self.backup_in_progress:
                         return self._retained_update()
                     if firmware:
                         await self.hass.async_add_executor_job(self.store.set_meta, "firmware", firmware)
@@ -211,7 +217,7 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_mutate(self, operation: str, *args):
         """Serialize writes and publish recalculated results without polling."""
         async with self._database_lock:
-            if self._paused or self._closed:
+            if self.backup_in_progress or self._closed:
                 raise HomeAssistantError("Aruba Monitor is temporarily unavailable during backup or unload")
             result = await self.hass.async_add_executor_job(getattr(self.store, operation), *args)
             if operation in {"delete_client", "delete_ssid"}:
@@ -221,14 +227,20 @@ class ArubaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_prepare_backup(self):
         """Drain writes and make the main SQLite file independently consistent."""
-        async with self._database_lock:
-            self._paused = True
-            try:
-                await self.hass.async_add_executor_job(self.store.checkpoint)
-            except Exception:
-                self._paused = False
-                raise HomeAssistantError("Could not prepare the Aruba Monitor database for backup") from None
-        await self.async_refresh_status()
+        was_paused = self._paused
+        try:
+            async with self._database_lock:
+                self._paused = True
+                try:
+                    await self.hass.async_add_executor_job(self.store.checkpoint)
+                except Exception:
+                    raise HomeAssistantError(
+                        "Could not prepare the Aruba Monitor database for backup"
+                    ) from None
+            await self.async_refresh_status()
+        except BaseException:
+            self._paused = was_paused
+            raise
 
     async def async_finish_backup(self):
         self._paused = False
